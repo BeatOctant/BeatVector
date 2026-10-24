@@ -1,0 +1,30 @@
+# environments / caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# vector stores and generated data
+store/
+*.npz
+swing_rows*.jsonl.gz
+*.log
+
+# local configuration (paths)
+octantvector.toml
+
+# personal data: never commit
+raw/
+playdata/
+*.dat
+*.db
+*.bsor
+*.bplist
+votedSongs.json
+signals.json
+plays.json
+eval_*.jsonl*
