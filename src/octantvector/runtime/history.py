@@ -4,9 +4,11 @@ Each event has `type` (upvote / downvote / like / play / user_delete / recommend
 `at`. A play also has `characteristic`, `difficulty`, `result` (clear / fail / quit / restart) and may have `modifiers` and a
 score.
 `imported_play` (`count` per chart, made once by OctantPath from the game's PlayerData when OctantPath is installed)
-alone makes a map neither liked nor a goal (likes.py), and never counts towards the skill: the count includes quits
-and has no results (OctantSpecs octantvector/law.md 4.1). Its chart still says which charts of a liked map the player
-played, so it can stand in for plays as a taste reference (recommend.py).
+alone makes a map neither liked nor a goal (likes.py): the count includes quits and has no results (OctantSpecs
+octantvector/law.md 4.1). Its chart still says which charts of a liked map the player played, so it can stand in for
+plays as a taste reference (recommend.py). One with `cleared` (PlayerData has a score for the chart: cleared at least
+once, modifiers unknown) fills the strong set behind the player's own clears (skill.py), so the skill is there from
+the first play; it never counts as a clear or a fail anywhere else.
 Granularity is kept: plays are per chart, the other signals per map (OctantSpecs constitution.md, principle 2).
 
 An event on an old version is moved to the current version of the same map; a play moves to the chart with the same
@@ -34,6 +36,8 @@ class History:
     plays: list = field(default_factory=list)     # Play, oldest first
     replaced: list = field(default_factory=list)  # {"from", "to"} for every old version moved to the current one
     imported: dict = field(default_factory=dict)  # hash -> chart keys in the DB its imported_play events name
+    imported_clears: dict = field(default_factory=dict)  # chart key in the DB -> PlayerData play count, for the
+                                                         # imported_play events with `cleared`
     unknown: int = 0                              # events on maps the DB does not have
 
     def liked(self):
@@ -90,6 +94,8 @@ def parse(db, events):
             key = chartids.key(cur, e.get("characteristic"), e.get("difficulty"))
             if key in db.chart_pos:
                 hist.imported.setdefault(cur, set()).add(key)
+                if e.get("cleared") is True:
+                    hist.imported_clears[key] = hist.imported_clears.get(key, 0) + int(e.get("count") or 0)
         elif t == "user_delete":
             s["deleted"] += 1
         else:

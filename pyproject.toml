@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "octantvector"
-version = "0.9.1"
+version = "0.9.2"
 description = "Vector DB generation and recommendation over a local BeatSaver map archive (a library for OctantHarvest and OctantCompass)"
 readme = "README.md"
 requires-python = ">=3.11.4"  # tarfile extraction filters (runtime/update.py)

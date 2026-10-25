@@ -2,7 +2,14 @@
 
 Per play style (charts of different play styles are never compared, constitution principle 2):
   features   chart features from charts.parquet, standardised over the DB's charts of that play style
-  strong set the most recent plain clears (speed 1.0, no modifiers; quits never count)
+  strong set the most recent plain clears (speed 1.0, no modifiers; quits never count), then, while there is room,
+             the charts PlayerData says were cleared before OctantPath (imported_play with `cleared`), most played
+             first: PlayerData has no dates, and its clears may have had modifiers. Each new own clear takes the
+             place of the least played of them once the set is full. They count towards minClears, so the skill is
+             there from the first play, and only place the skill: the curve and the weak directions come from the
+             player's own plays (exp-early-fit, 2026-10-25: closest to the full history both for a player whose
+             skill is stable and for one whose PlayerData is easier than their skill now; dropping them sooner did
+             not do better)
   distance   of a chart: mean distance to its k nearest strong charts (the chart itself excluded)
   weak directions  a feature higher, or lower, than the strong charts, where the player fails more than the
              configured weights say: learned from the recent plain clears and fails (since the strong set's oldest
@@ -179,6 +186,7 @@ def estimate(db, hist, p):
     styles = np.array(db.play_styles, dtype=object)
     out = {}
     plain = [pl for pl in hist.plays if pl.plain and pl.chart is not None and pl.result in ("clear", "fail")]
+    imported = [db.chart_pos[k] for k, _ in sorted(hist.imported_clears.items(), key=lambda kv: (-kv[1], kv[0]))]
     for style in sorted(set(db.play_styles)):
         rows = np.flatnonzero(styles == style)
         X = raw[rows]
@@ -198,6 +206,11 @@ def estimate(db, hist, p):
             if len(strong) >= p["strongRecentClears"]:
                 since = pl.at
                 break
+        for r in imported:  # PlayerData's clears fill what is left
+            if len(strong) >= p["strongRecentClears"]:
+                break
+            if db.play_styles[r] == style and r not in strong and np.isfinite(raw[r]).all():
+                strong.append(r)
         if len(strong) < max(2, p["minClears"]):
             continue
         st = Style(style, rows, X, w, strong, p)

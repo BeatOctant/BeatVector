@@ -33,7 +33,7 @@
 | OctantCompass（推薦の計算を呼ぶ） | 最新 | [契約1 推薦側（OctantCompass → OctantVector）](https://github.com/BeatOctant/OctantSpecs/blob/main/contracts/engine-runtime.md) 1.0、[契約2（DB 生成 ↔ 推薦コア）](https://github.com/BeatOctant/OctantSpecs/blob/main/contracts/vector-db.md) 1.1 |
 | OctantVectorPlugins | `PLUGIN_API` 0.3 のもの（いまの main） | `octantvector.plugin` |
 
-このリポジトリの今の版は v0.9.1 です。
+このリポジトリの今の版は v0.9.2 です。
 
 ## セットアップ
 
@@ -65,7 +65,7 @@ python -m venv .venv
 .venv/bin/octantvector check
 ```
 
-OctantCompass と OctantHarvest は、このリポジトリの版のタグ（`v0.9.1` の形）から `pip install "octantvector @ git+https://github.com/BeatOctant/OctantVector@v0.9.1"` で入れます（[契約1（OctantCompass/OctantHarvest to OctantVector）の版の付け方](https://github.com/BeatOctant/OctantSpecs/blob/main/contracts/engine-runtime.md#版の付け方)）。タグを付ける前の変更を使うときは、そのコミットから入れます（`@<コミット>`。タグはいくつかの変更をまとめて付ける。2026-10-19）。
+OctantCompass と OctantHarvest は、このリポジトリの版のタグ（`v0.9.2` の形）から `pip install "octantvector @ git+https://github.com/BeatOctant/OctantVector@v0.9.2"` で入れます（[契約1（OctantCompass/OctantHarvest to OctantVector）の版の付け方](https://github.com/BeatOctant/OctantSpecs/blob/main/contracts/engine-runtime.md#版の付け方)）。タグを付ける前の変更を使うときは、そのコミットから入れます（`@<コミット>`。タグはいくつかの変更をまとめて付ける。2026-10-19）。
 
 ## 使い方
 

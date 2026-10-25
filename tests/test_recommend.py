@@ -5,7 +5,10 @@ import numpy as np
 import pytest
 
 from octantvector.common import dbformat
+from octantvector.common.params import resolve
 from octantvector.runtime import RequestError, SeedNotEmbeddedError, SeedNotInDBError, describe, open_db, recommend
+from octantvector.runtime.history import parse
+from octantvector.runtime.skill import estimate
 
 MUSIC, CHART, GENRE = "music_x@1", "chart_x@1", "genre_x@1"
 N = 40
@@ -226,7 +229,7 @@ def test_describe_summarises_without_scores(db):
     assert describe(db, [], None)["playStyles"] == {}
 
 
-def test_imported_play_counts_only_without_plays_and_never_as_skill(db):
+def test_imported_play_counts_only_without_plays_and_as_skill_only_when_cleared(db):
     imp = [{"type": "imported_play", "hash": H(3), "characteristic": "Standard", "difficulty": "Hard", "count": 3,
             "at": "2026-09-01T00:00:00Z"}]
     assert recommend(db, imp, {"count": 3})["items"] == []  # the count alone is not a liked map
@@ -236,6 +239,24 @@ def test_imported_play_counts_only_without_plays_and_never_as_skill(db):
     assert recommend(db, imp + [like(3), play(3, result="quit")], {"count": 3})["items"] == []
     many = [dict(imp[0], hash=H(20 + k)) for k in range(12)]
     assert recommend(db, many, {"count": 3}, {"minClears": 10})["aims"] == {}  # not clears
+    cleared = [dict(e, cleared=True) for e in many]
+    assert describe(db, cleared, {"minClears": 10})["playStyles"]["Standard"]["strongCharts"] == 12
+
+
+def test_imported_clears_fill_the_strong_set_behind_own_clears_most_played_first(db):
+    """PlayerData's clears (imported_play with `cleared`) count towards minClears and fill what the player's own plain
+    clears leave of the strong set, most played first."""
+    imp = [{"type": "imported_play", "source": "PlayerData", "hash": H(20 + k), "characteristic": "Standard",
+            "difficulty": "Expert", "count": 1 + k, "cleared": True, "at": "2026-09-01T00:00:00Z"} for k in range(8)]
+    own = [play(10 + k, "Hard", at=f"2026-09-{k + 2:02d}T00:00:00Z") for k in range(3)]
+    p = {"minClears": 5, "strongRecentClears": 5}
+    hist = parse(db, imp + own)
+    st = estimate(db, hist, resolve(p))["Standard"]
+    keys = [db.chart_keys[r] for r in st.strong]
+    assert keys[:3] == [f"{H(12 - k)}:Standard:Hard" for k in range(3)]  # own clears first, most recent first
+    assert keys[3:] == [f"{H(27)}:Standard:Expert", f"{H(26)}:Standard:Expert"]  # then the most played imports
+    assert estimate(db, parse(db, imp[:4]), resolve(p)) == {}  # 4 < minClears
+    assert "Standard" in estimate(db, parse(db, imp[:5]), resolve(p))
 
 
 def test_like_removed_is_back_to_no_favorite_not_a_dislike(db):
