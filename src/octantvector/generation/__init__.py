@@ -8,7 +8,7 @@ It imports `common` and never the runtime: the DB is the only thing that passes 
 
 # the generation API's version (OctantSpecs contracts/engine-generation.md, 版の付け方): separate from the package
 # version and from the runtime's; OctantHarvest checks it before a run
-API_VERSION = "1.0"
+API_VERSION = "1.1"
 
 from .api import build_index, calibrate, compute, drift, keygen, models, pack, release, sign  # noqa: E402,F401
 from .errors import GenerationError, VersionError  # noqa: E402,F401  (VersionError: an unknown crawl or DB format)

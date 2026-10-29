@@ -34,6 +34,20 @@ DEFAULTS = {
     "penaltyWeight": 1.0,          # weight of the distance-from-target penalty (`beta`)
     "challengeClearChance": 0.5,   # clear chance the challenge aim targets
     "warmupScale": 0.5,            # warmup target = this x the normal target
+    # ceiling (足切り): an upper limit the player switches on, apart from the aims (2026-10-25)
+    "ceiling": False,              # drop the charts above the player's ceiling in any of ceilingFeatures, or
+                                   # below their floor in any of floorFeatures
+    "ceilingFeatures": ["pass"],   # provisional: chart metrics the ceiling is set in (Pass predicted one player's
+                                   # fails best; Movement added next to nothing, and notes on screen at once, nps x
+                                   # jump duration, dropped charts the player wanted unless set so high that it
+                                   # dropped none, 2026-10-25); a metric the DB lacks is not used
+    "ceilingPercentile": 97,       # provisional: the ceiling is this percentile of the player's recent clears (90
+                                   # dropped half the charts in play, 2026-10-25)
+    "floorFeatures": [],           # chart metrics the floor is set in (an NJS floor predicted fails less well
+                                   # than notes on screen at once and dropped more, 2026-10-25)
+    "floorBelowMedian": 3.0,       # provisional: the floor is the recent clears' median less this
+    "ceilingMinClears": 20,        # provisional: fewer clears in a play style (own plain ones, then PlayerData's up
+                                   # to strongRecentClears): no ceiling or floor there
 }
 
 AIMS = ("normal", "challenge", "warmup")
@@ -63,6 +77,9 @@ BOUNDS = {
     "penaltyWeight": (0, 10**6, False),
     "challengeClearChance": (0.001, 0.999, False),  # log(c / (1 - c)) must stay finite (skill.py)
     "warmupScale": (0, 100, False),
+    "ceilingPercentile": (0, 100, False),
+    "floorBelowMedian": (0, 1e6, False),
+    "ceilingMinClears": (1, 10**6, True),
 }
 
 
@@ -84,9 +101,12 @@ def why_invalid(params):
     for key, value in (params or {}).items():
         if key not in DEFAULTS:
             continue
-        if key == "includeKnown":
+        if key in ("includeKnown", "ceiling"):
             if not isinstance(value, bool):
-                return "includeKnown must be true or false"
+                return f"{key} must be true or false"
+        elif key in ("ceilingFeatures", "floorFeatures"):
+            if not isinstance(value, list) or not all(isinstance(f, str) for f in value):
+                return f"{key} must be a list of chart metric names"
         elif key == "features":
             if not isinstance(value, dict) or not all(isinstance(f, str) and _number(w, 0, 10**6, False)
                                                       for f, w in value.items()):

@@ -158,6 +158,23 @@ def test_genre_filters_by_the_word_and_ranks_by_recent_liked_plays(db):
     assert not isinstance(ex.value, SeedNotInDBError)
 
 
+def test_genre_from_picks_the_word_of_the_liked_maps(db):
+    # liked maps 2 and 4 are even ("jpop"); the word is picked from the list and narrows the candidates to its maps
+    hist = liked(2) + liked(4)
+    out = recommend(db, hist, {"genreFrom": ["rock", "jpop"], "count": 4}, {"genreTopShare": 0.5, **ONE_SONG_EACH})
+    assert out["items"] and all(m % 2 == 0 for m in maps_of(out))
+    assert all(m < N // 2 for m in maps_of(out))  # the reference is the liked maps, not recent plays
+    hist = liked(3) + liked(5)
+    out = recommend(db, hist, {"genreFrom": ["rock", "jpop"], "count": 4}, {"genreTopShare": 0.5, **ONE_SONG_EACH})
+    assert out["items"] and all(m % 2 == 1 for m in maps_of(out))
+    # only the listed words are picked from
+    out = recommend(db, hist, {"genreFrom": ["jpop"], "count": 4}, {"genreTopShare": 0.5, **ONE_SONG_EACH})
+    assert out["items"] and all(m % 2 == 0 for m in maps_of(out))
+    assert recommend(db, [], {"genreFrom": ["jpop"], "count": 4})["items"] == []
+    with pytest.raises(RequestError, match="genre words"):
+        recommend(db, hist, {"genreFrom": ["polka"]})
+
+
 def test_exclusions_and_charts_per_map(db):
     hist = liked(1)
     out = recommend(db, hist, {"count": 10, "chartsPerMap": 2})
@@ -583,3 +600,71 @@ def test_params_values_outside_the_bounds_are_refused(db):
             describe(db, [], bad)
     # a key this version does not know is still ignored, and whole numbers written as floats still pass
     recommend(db, [], {"count": 5}, {"futureKnob": 1e308, "narrowTopMaps": 300.0})
+
+
+def ceiling_db(tmp_path, with_metric=True, njs=lambda i: 16.0):
+    """Maps 0..39 with one Standard chart each whose pass (and an added metric column, movement) grows with i."""
+    c = dbformat.empty()
+    c["calibration"] = {"id": "cal1"}
+    music = {}
+    for i in range(N):
+        h = H(i)
+        c["maps"][h] = ("artist", "mapper", 120.0, "2025-01-01")
+        row = ("Standard", "Expert", 5.0, njs(i), float(i), None, "Standard")
+        c["charts"][h] = [row + ((float(N - i),) if with_metric else ())]
+        music[h] = unit([1.0, 0.01 * i, 0, 0])
+    if with_metric:
+        import pyarrow as pa
+        c["extra_cols"]["charts"] = [pa.field("movement", pa.float64())]
+    c["views"] = {MUSIC: {"meta": {"role": "music", "rows": "maps", "dim": 4}, "vecs": music}}
+    return open_db(dbformat.write_full(tmp_path / "db", c, "2026.10.25", "2026-10-25T00:00:00Z"))
+
+
+def test_a_metric_column_added_to_the_db_is_read(tmp_path):
+    db = ceiling_db(tmp_path)
+    assert db.chart_metrics["movement"][db.chart_pos[f"{H(3)}:Standard:Expert"]] == N - 3
+    assert np.isnan(db.chart_metrics["tech"]).all()
+
+
+def test_the_ceiling_drops_charts_above_the_recent_clears_in_every_hand(tmp_path):
+    db = ceiling_db(tmp_path)
+    hist = [like(0)] + [play(i, "Expert", at=f"2026-10-{i + 1:02d}T00:00:00Z") for i in range(20)]  # pass 0..19
+    p = {"ceilingFeatures": ["pass"], "ceilingPercentile": 100, "ceilingMinClears": 20, "mapsPerSong": 0,
+         "includeKnown": True}
+    off = recommend(db, hist, {"count": N}, p)
+    assert max(maps_of(off)) > 19  # off: the aims only (too few clears for a skill here)
+    on = recommend(db, hist, {"count": N}, {**p, "ceiling": True})
+    assert on["items"] and max(maps_of(on)) <= 19 and on["aims"] == {}  # pass above 19 dropped, without a skill
+    ch = recommend(db, hist, {"count": N, "difficulty": "challenge"}, {**p, "ceiling": True})
+    assert max(maps_of(ch)) <= 19
+    # the movement column limits too: movement N - i is above the clears' (21..40) for none, below for i > 19
+    both = recommend(db, hist, {"count": N}, {**p, "ceiling": True, "ceilingFeatures": ["pass", "movement"]})
+    assert maps_of(both) == maps_of(on)
+    # fewer clears than ceilingMinClears: no ceiling
+    assert max(maps_of(recommend(db, hist[:10], {"count": N}, {**p, "ceiling": True}))) > 19
+
+
+def test_the_ceiling_follows_the_recent_clears_and_takes_playerdata_only_when_too_few(tmp_path):
+    from octantvector.runtime.skill import ceilings
+    db = ceiling_db(tmp_path, with_metric=False)
+    p = resolve({"ceilingFeatures": ["pass", "unknown"], "floorFeatures": ["njs"], "ceilingPercentile": 100,
+                 "ceilingMinClears": 3, "strongRecentClears": 3})
+    old = [play(30 + k, "Expert", at=f"2026-09-{k + 1:02d}T00:00:00Z") for k in range(5)]  # hard, long ago
+    new = [play(k, "Expert", at=f"2026-10-{k + 1:02d}T00:00:00Z") for k in range(3)]
+    assert ceilings(db, parse(db, old + new), p) == {"Standard": {"pass": (-np.inf, 2.0), "njs": (13.0, np.inf)}}
+    # the 3 most recent clears; the floor is their NJS median (16) less 3
+    imp = [{"type": "imported_play", "hash": H(10 + k), "characteristic": "Standard", "difficulty": "Expert",
+            "count": 1 + k, "cleared": True, "at": "2026-09-01T00:00:00Z"} for k in range(5)]
+    assert ceilings(db, parse(db, imp + new[:1]), p)["Standard"]["pass"] == (-np.inf, 14.0)  # own 0, then 14 and 13
+    assert ceilings(db, parse(db, new[:2]), p) == {}
+
+
+def test_the_floor_drops_charts_slower_than_the_recent_clears_by_more_than_the_margin(tmp_path):
+    db = ceiling_db(tmp_path, njs=lambda i: 10.0 if i % 2 else 16.0)  # odd maps slow
+    hist = [like(0)] + [play(i, "Expert", at=f"2026-10-{i // 2 + 1:02d}T00:00:00Z") for i in range(0, 40, 2)]
+    p = {"ceilingFeatures": [], "floorFeatures": ["njs"], "mapsPerSong": 0, "includeKnown": True}
+    assert any(m % 2 for m in maps_of(recommend(db, hist, {"count": N}, p)))
+    on = recommend(db, hist, {"count": N}, {**p, "ceiling": True})
+    assert on["items"] and not any(m % 2 for m in maps_of(on))  # NJS 10 is below 16 - 3
+    wide = recommend(db, hist, {"count": N}, {**p, "ceiling": True, "floorBelowMedian": 6.0})
+    assert any(m % 2 for m in maps_of(wide))

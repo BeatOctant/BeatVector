@@ -95,7 +95,8 @@ def _work(task):
 
 def run(cfg, encoder_ids, pool="distribution", n=None, seed=2, retry_errors=False, log=sys.stderr):
     """Compute `encoder_ids` (and the sources of derived ones) over the pool `pool`. n: random subset of the pool
-    (tests and quick experiments)."""
+    (tests and quick experiments).
+    -> {encoder id: maps left for a later run because the GPU had no room for them} (only encoders that left any)."""
     arch, cat = cfg.require("archive"), cfg.require("catalogue")
     if not encoder_ids:
         raise GenerationError("name the views to compute")
@@ -133,8 +134,7 @@ def run(cfg, encoder_ids, pool="distribution", n=None, seed=2, retry_errors=Fals
             for i in mapped:
                 _run_map(led, encs[i], stores[i], pending, plan[i], recs)
         heavy = [i for i in plan if encs[i].kind in MAIN_KINDS + ("zip",) and plan[i]]
-        if heavy:
-            _run_heavy(cfg, arch, led, encs, stores, pending, {i: plan[i] for i in heavy}, log)
+        no_room = _run_heavy(cfg, arch, led, encs, stores, pending, {i: plan[i] for i in heavy}, log) if heavy else {}
         for i in [i for i in encs if encs[i].kind == "derived"]:
             # derived views follow their source store; whatever they add is recorded like any other result
             try:
@@ -144,6 +144,10 @@ def run(cfg, encoder_ids, pool="distribution", n=None, seed=2, retry_errors=Fals
                 continue
             led.adopt(encs[i], stores[i].fingerprint, Store(encs[i], cfg.store).done())
         print("ledger: " + str(led.summary()), file=log)
+        if no_room:
+            print("left for a later run, the GPU had no room: " + ", ".join(f"{i} {k}" for i, k in no_room.items()),
+                  file=log)
+        return no_room
     finally:
         led.close()
 
@@ -189,6 +193,7 @@ def _run_map(led, enc, store, pending, todo, recs):
 
 
 def _run_heavy(cfg, arch, led, encs, stores, pending, plan, log):
+    """-> {encoder id: maps the GPU had no room for} (_consume)."""
     heavy = list(plan)
     want = {}
     for i, hs in plan.items():
@@ -206,12 +211,12 @@ def _run_heavy(cfg, arch, led, encs, stores, pending, plan, log):
         if cfg.workers <= 1:  # in-process (tests, debugging)
             _init(heavy, str(arch))
             results = map(_work, tasks)
-            _consume(led, encs, stores, results, len(tasks), t0, log)
+            return _consume(led, encs, stores, results, len(tasks), t0, log)
         else:
             limit = cfg.worker_memory_gb * 2**30 if cfg.worker_memory_gb > 0 else None
             with closing(parallel(_work, tasks, cfg.workers, _init, (heavy, str(arch), config.current()),
                                   memory_limit=limit)) as results:
-                _consume(led, encs, stores, (_unpack(t, r, log) for t, r in results), len(tasks), t0, log)
+                return _consume(led, encs, stores, (_unpack(t, r, log) for t, r in results), len(tasks), t0, log)
     finally:
         for i in heavy:
             stores[i].flush()
@@ -355,14 +360,18 @@ def _consume(led, encs, stores, results, total, t0, log):
 
     The models run in one thread of their own, so the main process goes on taking in the workers' results (and the
     workers go on decoding) while the GPU works: neither waits for the other. Only the main process writes the ledger
-    and the stores; results are recorded in the order the groups were handed over."""
-    groups, ahead = {}, deque()
+    and the stores; results are recorded in the order the groups were handed over.
+
+    When the GPU has no room, the models get smaller groups (_run_model); a map that does not fit even alone is not
+    recorded, so the next run computes it. -> {encoder id: such maps} (only encoders that left any)."""
+    groups, ahead, no_room = {}, deque(), {}
+    sizes = {i: [getattr(e, "batch", 1)] for i, e in encs.items()}  # maps per model call, shrunk by _run_model
     model = ThreadPoolExecutor(1, thread_name_prefix="octantvector-model")
 
     def hand_over(i, group):
-        ahead.append((i, group, model.submit(_run_model, encs[i], [x for _, x in group])))
+        ahead.append((i, group, model.submit(_run_model, encs[i], [x for _, x in group], sizes[i], log)))
         while ahead and (len(ahead) > GPU_AHEAD or ahead[0][2].done()):
-            _record_group(led, encs, stores, *ahead.popleft())
+            _record_group(led, encs, stores, no_room, *ahead.popleft())
 
     try:
         for k, (h, ids, sha, out, err) in enumerate(results, 1):
@@ -400,9 +409,10 @@ def _consume(led, encs, stores, results, total, t0, log):
             for i, g in groups.items():
                 hand_over(i, g)
             while ahead:
-                _record_group(led, encs, stores, *ahead.popleft())
+                _record_group(led, encs, stores, no_room, *ahead.popleft())
         finally:
             model.shutdown(wait=True)
+    return no_room
 
 
 def _embedded(led, enc, store, h, v):
@@ -414,13 +424,52 @@ def _embedded(led, enc, store, h, v):
         _add(store, h, v)
 
 
-def _run_model(enc, xs):
-    """In the model thread: one output per prepped map (embed_many for an encoder with a batch, else embed)."""
-    return enc.embed_many(xs) if getattr(enc, "batch", 1) > 1 else [enc.embed(x) for x in xs]
+# the output of a map the GPU had no room for even alone: nothing is recorded for it, so a later run computes it
+NO_ROOM = object()
 
 
-def _record_group(led, encs, stores, i, group, future):
-    """Record a group handed to the model thread, waiting for it if the model is still at work."""
+def _out_of_memory(ex):
+    """Whether `ex` is torch's CUDA out of memory (told by its name: torch is not imported here)."""
+    return type(ex).__name__ == "OutOfMemoryError"
+
+
+def _empty_cache():
+    """Give the GPU memory torch holds cached for other models back, so the next try has the room they left."""
+    torch = sys.modules.get("torch")
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _run_model(enc, xs, size, log):
+    """In the model thread: one output per prepped map (embed_many for an encoder with a batch, else embed), `size[0]`
+    maps per call. When the GPU has no room (other models' and other programs' memory, e.g. a VR server), the cache is
+    emptied and the call tried again with half as many maps, down to one; the encoder keeps the smaller size for the
+    rest of the run (size is shared by its groups). A map that still does not fit alone, tried twice, gets NO_ROOM."""
+    out, again = [], False
+    while len(out) < len(xs):
+        part = xs[len(out):len(out) + size[0]]
+        try:
+            out += enc.embed_many(part) if getattr(enc, "batch", 1) > 1 else [enc.embed(x) for x in part]
+            again = False
+            continue
+        except Exception as ex:
+            if not _out_of_memory(ex):
+                raise
+        _empty_cache()  # outside the except: the failed call's tensors, held by its traceback, are freed by now
+        if size[0] > 1:
+            size[0] //= 2
+            print(f"{enc.id}: the GPU had no room, {size[0]} maps at a time from now", file=log, flush=True)
+        elif not again:
+            again = True
+        else:
+            out.append(NO_ROOM)
+            again = False
+    return out
+
+
+def _record_group(led, encs, stores, no_room, i, group, future):
+    """Record a group handed to the model thread, waiting for it if the model is still at work. A map the GPU had no
+    room for is only counted in no_room."""
     enc, store = encs[i], stores[i]
     try:
         vs = future.result()
@@ -428,6 +477,9 @@ def _record_group(led, encs, stores, i, group, future):
         led.record(enc, store.fingerprint, [(h, "error", None, repr(ex)) for h, _ in group])
         return
     for (h, _), v in zip(group, vs):
+        if v is NO_ROOM:
+            no_room[i] = no_room.get(i, 0) + 1
+            continue
         try:
             _embedded(led, enc, store, h, v)
         except Exception as ex:

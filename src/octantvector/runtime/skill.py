@@ -225,3 +225,45 @@ def estimate(db, hist, p):
                 st.curve = _logistic(np.array([st.distance(r) for r in charts]), np.array(cleared, float))
         out[style] = st
     return out
+
+
+def ceilings(db, hist, p):
+    """-> {play style: {metric: (floor, ceiling)}}: the limits the player switched on (`ceiling`), apart from the aims.
+    In each play style they are set over the player's most recent plain clears (one per chart, `strongRecentClears`
+    at most), so they follow the player's skill now rather than their best; PlayerData's clears (most played first)
+    fill up to that number when there are fewer. The ceiling is the `ceilingPercentile` of each of `ceilingFeatures`
+    (-inf floor), the floor the median less `floorBelowMedian` of each of `floorFeatures` (inf ceiling); a metric in
+    both gets both. A play style with fewer than `ceilingMinClears` clears, or a metric the DB lacks or the clears
+    have no value of, gets none."""
+    tops = [f for f in p["ceilingFeatures"] if f in db.chart_metrics]
+    bottoms = [f for f in p["floorFeatures"] if f in db.chart_metrics]
+    if not tops and not bottoms:
+        return {}
+    imported = [db.chart_pos[k] for k, _ in sorted(hist.imported_clears.items(), key=lambda kv: (-kv[1], kv[0]))]
+    clears = [db.chart_pos[pl.chart] for pl in hist.plays
+              if pl.plain and pl.chart is not None and pl.result == "clear"]
+    out = {}
+    for style in sorted(set(db.play_styles)):
+        rows = []
+        for r in reversed(clears):  # most recent first, one entry per chart
+            if db.play_styles[r] == style and r not in rows:
+                rows.append(r)
+            if len(rows) >= p["strongRecentClears"]:
+                break
+        for r in imported:
+            if len(rows) >= p["strongRecentClears"]:
+                break
+            if db.play_styles[r] == style and r not in rows:
+                rows.append(r)
+        if len(rows) < p["ceilingMinClears"]:
+            continue
+        cap = {}
+        for f in dict.fromkeys(tops + bottoms):
+            v = db.chart_metrics[f][rows]
+            v = v[np.isfinite(v)]
+            if len(v):
+                cap[f] = (float(np.median(v)) - p["floorBelowMedian"] if f in bottoms else -np.inf,
+                          float(np.percentile(v, p["ceilingPercentile"])) if f in tops else np.inf)
+        if cap:
+            out[style] = cap
+    return out

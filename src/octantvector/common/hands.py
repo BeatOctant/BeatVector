@@ -48,6 +48,13 @@ def _genre(value, views, genres):
     return None if value in genres else f"the DB has no genre word {value!r}"
 
 
+def _genre_from(value, views, genres):
+    if not isinstance(value, list) or not value:
+        return "genreFrom is not a list of genre words"
+    missing = [w for w in value if w not in genres]
+    return f"the DB has no genre words {missing!r}" if missing else None
+
+
 def _params(value, views, genres):
     if not isinstance(value, dict):
         return "params is not an object"
@@ -59,11 +66,12 @@ def _params(value, views, genres):
 
 
 # Handlings this OctantVector knows: {handling: {knob: (check, contract 1 (OctantCompass/OctantHarvest to OctantVector) condition it becomes)}}.
-#   near              rank by the weighted views around the seed (or the history without one)
+#   near              rank by the weighted views around the seed (or the history without one); without a seed,
+#                     `genreFrom` picks the word of the list the liked maps are closest to and keeps its maps
 #   narrow_then_rank  keep the maps closest by `narrow`, then rank them by `rank` (recommend's `narrow` condition)
 HANDLINGS = {
     "near": {"weights": (_views, "weights"), "difficulty": (_difficulty, "difficulty"), "genre": (_genre, "genre"),
-             "params": (_params, "params")},
+             "genreFrom": (_genre_from, "genreFrom"), "params": (_params, "params")},
     "narrow_then_rank": {"narrow": (_views, "narrow"), "rank": (_views, "weights"),
                          "difficulty": (_difficulty, "difficulty"), "params": (_params, "params")},
 }

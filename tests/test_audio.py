@@ -174,11 +174,76 @@ def test_a_group_the_model_fails_on_is_recorded_as_errors_and_the_others_go_on()
 
         def embed_many(self, xs):
             if 0 in xs:
-                raise RuntimeError("CUDA out of memory")
+                raise RuntimeError("the model broke")
             return [np.ones(2, np.float32) for _ in xs]
 
     led, store = Led(), Store()
     results = [(str(n) * 40, ["f"], "s", {"f": n}, None) for n in range(4)]
     embed._consume(led, {"f": Flaky()}, {"f": store}, iter(results), 4, 0, io.StringIO())
     assert [(r[0], r[1]) for r in led.rows] == [("0" * 40, "error"), ("1" * 40, "error")]
-    assert "CUDA out of memory" in led.rows[0][3] and store.added == ["2" * 40, "3" * 40]
+    assert "the model broke" in led.rows[0][3] and store.added == ["2" * 40, "3" * 40]
+
+
+class OutOfMemoryError(RuntimeError):
+    """Named like torch.cuda.OutOfMemoryError, which embed tells by its name."""
+
+
+def _ledger_and_store():
+    class Led:
+        def __init__(self):
+            self.rows = []
+
+        def zip_sha(self, h, sha):
+            return True
+
+        def record(self, enc, fp, rows):
+            self.rows += rows
+
+    class Store:
+        fingerprint = "f"
+
+        def __init__(self):
+            self.added = []
+
+        def add(self, h, x):
+            self.added.append(h)
+
+    return Led(), Store()
+
+
+def test_a_group_the_gpu_has_no_room_for_is_split_and_the_encoder_keeps_the_smaller_size():
+    class Tight(_Audio):
+        id = "t"
+        batch = 4
+        calls = []
+
+        def embed_many(self, xs):
+            self.calls.append(len(xs))
+            if len(xs) > 1:
+                raise OutOfMemoryError("CUDA out of memory")
+            return [np.ones(2, np.float32) for _ in xs]
+
+    (led, store), enc, log = _ledger_and_store(), Tight(), io.StringIO()
+    results = [(str(n) * 40, ["t"], "s", {"t": n}, None) for n in range(8)]
+    assert embed._consume(led, {"t": enc}, {"t": store}, iter(results), 8, 0, log) == {}
+    assert enc.calls == [4, 2, 1, 1, 1, 1, 1, 1, 1, 1]  # the second group goes one map at a time from the start
+    assert store.added == [str(n) * 40 for n in range(8)] and led.rows == []
+    assert "t: the GPU had no room, 2 maps at a time from now" in log.getvalue()
+
+
+def test_a_map_the_gpu_has_no_room_for_even_alone_is_not_recorded_so_a_later_run_computes_it():
+    class Huge(_Audio):
+        id = "h"
+        tries = []
+
+        def embed(self, x):
+            if x == 1:
+                self.tries.append(x)
+                raise OutOfMemoryError("CUDA out of memory")
+            return np.ones(2, np.float32)
+
+    (led, store), enc = _ledger_and_store(), Huge()
+    results = [(str(n) * 40, ["h"], "s", {"h": n}, None) for n in range(3)]
+    assert embed._consume(led, {"h": enc}, {"h": store}, iter(results), 3, 0, io.StringIO()) == {"h": 1}
+    assert enc.tries == [1, 1]  # tried again once with the cache emptied
+    assert store.added == ["0" * 40, "2" * 40] and led.rows == []

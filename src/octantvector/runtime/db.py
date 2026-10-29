@@ -202,6 +202,15 @@ def _credits(view):
     return [x for x in c if isinstance(x, str)] if isinstance(c, list) else []
 
 
+TEXT_COLS = ("hash", "characteristic", "difficulty", "play_style")
+
+
+def _numbers(values):
+    """True when a charts.parquet column holds numbers (or nothing): a metric, known (nps, njs, pass, tech) or added by
+    a newer DB (its other columns are carried as they are, dbformat.py)."""
+    return all(v is None or (isinstance(v, (int, float)) and not isinstance(v, bool)) for v in values)
+
+
 def open_db(path):
     path = Path(path)
     manifest = read_manifest(path, "full")  # schemaVersion, kind and every file's SHA-256
@@ -222,7 +231,7 @@ def open_db(path):
         x, rows = read_view(path, manifest, key, n_rows[v["rows"]])
         views[key] = (x.astype(np.float32), rows)
     metrics = {c: np.array([np.nan if v is None else v for v in ch[c]], np.float64)
-               for c in ("nps", "njs", "pass", "tech") if c in ch}
+               for c in ch if c not in TEXT_COLS and _numbers(ch[c])}
     return DB(path, manifest, hashes, keys, list(ch["play_style"]), superseded, views, skipped, metrics, relations)
 
 

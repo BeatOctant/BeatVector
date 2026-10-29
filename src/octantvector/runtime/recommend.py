@@ -7,7 +7,10 @@ recommend(db, history, request, params) ranks charts for one player:
      the player played recently (music views only, inside the maps closest to the word); otherwise all liked maps.
      Chart views take the charts the player played in those maps (imported_play charts for a map with no play).
      With a seed and a genre word, the seed stays the reference and the word only narrows the candidates to the maps
-     closest to it.
+     closest to it. With `genreFrom` (a list of genre words) and neither a seed nor a word, the word is picked for
+     the player: the one of the list whose value is highest on average over the liked maps; the reference is all
+     liked maps and the candidates are that word's maps ("your genre", measured by listening in OctantVector
+     spikes/2026-10-29-genre-view).
   3. every candidate chart gets a weighted mean of its views' cosines to the reference. A view the chart (or its
      map) has no vector in counts 0 and the weights are not renormalised; a chart whose views carry less than
      `minViewWeight` of the weight is dropped (OctantSpecs law 3.1). A view no reference has a vector in is not used.
@@ -18,6 +21,10 @@ recommend(db, history, request, params) ranks charts for one player:
      penalty growing with the distance from the target. Play styles without enough clears are not filtered.
      Maps the player already knows are left out unless `includeKnown`; with the challenge aim, goals (law 4.1) stay
      in, in the play styles with a skill only, so a goal comes back once the skill has caught up with it.
+     With `ceiling` (switched on by the player), charts above the player's ceiling in any of `ceilingFeatures` or
+     below their floor in any of `floorFeatures` (skill.ceilings, from their recent clears) are dropped in every hand
+     and never widened back; the challenge aim then takes the hardest charts left under it when too few are near
+     its target.
   5. the best `chartsPerMap` charts of each map, the best `mapsPerSong` maps of each song and the best
      `mapsPerArtist` maps of each artist, then the best `count` overall. Fewer are returned when fewer pass. Two maps
      are the same song when their music views' mean cosine is at least `sameSongCosine` (other mappers' maps of one
@@ -236,6 +243,24 @@ def _exclusions(db, exclude):
     return maps, chart_rows
 
 
+def _taste_word(db, words, liked):
+    """The word of `words` whose value is highest on average over the liked maps that have it; None without any."""
+    g = db.genres()
+    missing = [w for w in words if w not in g]
+    if missing:
+        raise RequestError(f"genre words {missing!r} are not in DB {db.version}; words: {sorted(g)}")
+    best = None
+    for w in words:
+        view, dim = g[w]
+        x, rows = db.views[view]
+        on = np.isin(rows, [db.pos[h] for h in liked])
+        if on.any():
+            mean = float(x[on, dim].mean())
+            if best is None or mean > best[0]:
+                best = (mean, w)
+    return None if best is None else best[1]
+
+
 def _genre_maps(db, word, share):
     g = db.genres()
     if word not in g:
@@ -300,6 +325,11 @@ def recommend(db, history, request, params=None):
             ref_maps = sorted(set(recent) & liked)
             default = _even(db, ("music",))
             weights = {v: w for v, w in weights.items() if db.manifest["views"][v].get("role") == "music"} or default
+        elif request.get("genreFrom") is not None:
+            word = _taste_word(db, request["genreFrom"], liked)
+            if word is not None:
+                allowed_maps = _genre_maps(db, word, float(p["genreTopShare"]))
+            ref_maps = sorted(liked)
         else:
             ref_maps = sorted(liked)
         if not ref_maps or not weights:
@@ -336,6 +366,14 @@ def recommend(db, history, request, params=None):
         z[st.rows] = np.abs(d - targets[style][1]) / st.sd
     cand &= ~skilled | np.isfinite(dist)
     cand &= skilled | ~_map_mask(db, goals)[chart_map]  # a goal only in play styles whose skill can tell
+    caps = skill_mod.ceilings(db, hist, p) if p["ceiling"] else {}
+    if caps:
+        styles = np.array(db.play_styles, dtype=object)
+        for style, cap in caps.items():
+            rows = np.flatnonzero(styles == style)
+            for f, (low, top) in cap.items():
+                v = db.chart_metrics[f][rows]
+                cand[rows[(v < low) | (v > top)]] = False  # a chart without the value stays
 
     def diff(c):
         if not skilled[c]:
@@ -358,6 +396,10 @@ def recommend(db, history, request, params=None):
         while len(picked) < count and tol < tol_max:
             tol = min(tol_max, tol + 0.5)
             picked = _pick(db, within, skilled, z, scored.score - pen, tol, count, per_map, songs)
+        if len(picked) < count and caps and difficulty == "challenge":
+            # under the ceiling the challenge target may lie above it: take the rest by the score, whose penalty puts
+            # the charts nearest the target (the hardest left under the ceiling) first
+            picked = _pick(db, within, skilled, z, scored.score - pen, np.inf, count, per_map, songs)
         if len(picked) >= count or in_narrow is None or top >= len(narrowed):
             break
         top *= max(2, int(p["narrowWiden"]))  # too few in the narrowed maps (a rare play style): take more of them

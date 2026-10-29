@@ -126,18 +126,24 @@ def _results(store):
 def compute(input, store, views, params=None, pool="distribution", models_dir=None, log=None):
     """Ingest the crawl into the ledger and compute what it says is missing for `views` (and the sources of derived
     ones) over the pool `pool` (params["pools"], OctantSpecs octantvector/config.md). models_dir: the folder holding the
-    models `models(views)` lists. Resumable; a second call right after computes nothing.
-    -> {"computed": n, "failed": n, "skipped": n, "views": {id@version: {"ok"|"error"|"skip": n}}}, this call's."""
+    models `models(views)` lists. Resumable; a second call right after computes nothing. When the GPU has no room the
+    models take fewer maps at a time; a map that does not fit even alone is left uncomputed and unrecorded ("deferred"),
+    so the next call computes it.
+    -> {"computed": n, "failed": n, "skipped": n, "deferred": n,
+        "views": {id@version: {"ok"|"error"|"skip"|"deferred": n}}}, this call's."""
     ids = _ids(views)
     with config.given(_values(input, store, params, models_dir)):
         before = _results(store)
-        embed.run(config.load(), ids, pool=pool, log=log or io.StringIO())
+        no_room = embed.run(config.load(), ids, pool=pool, log=log or io.StringIO())
         rows = _results(store) - before  # results written or changed by this call
     per = {}
     for _, enc, r, *_ in rows:
         per.setdefault(enc, {})[r] = per.get(enc, {}).get(r, 0) + 1
-    total = {r: sum(v.get(r, 0) for v in per.values()) for r in ("ok", "error", "skip")}
-    return {"computed": total["ok"], "failed": total["error"], "skipped": total["skip"], "views": per}
+    for i, k in no_room.items():
+        per.setdefault(f"{i}@{get(i).version}", {})["deferred"] = k
+    total = {r: sum(v.get(r, 0) for v in per.values()) for r in ("ok", "error", "skip", "deferred")}
+    return {"computed": total["ok"], "failed": total["error"], "skipped": total["skip"], "deferred": total["deferred"],
+            "views": per}
 
 
 @_contract

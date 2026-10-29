@@ -46,7 +46,20 @@ def test_compute_is_resumable_and_reads_only_its_arguments(harvest):
     got = gen.compute(crawl, store, VIEWS, PARAMS)
     assert got["computed"] == 48 and got["failed"] == 0 and set(got["views"]) == set(VIEWS)
     assert (store / "ledger.sqlite").exists() and not (tmp_path / "store").exists()
-    assert gen.compute(crawl, store, VIEWS, PARAMS) == {"computed": 0, "failed": 0, "skipped": 0, "views": {}}
+    assert gen.compute(crawl, store, VIEWS, PARAMS) == {"computed": 0, "failed": 0, "skipped": 0, "deferred": 0,
+                                                         "views": {}}
+
+
+def test_compute_reports_the_maps_the_gpu_had_no_room_for_and_the_next_call_computes_them(harvest, monkeypatch):
+    from octantvector.generation import embed
+    _, crawl, store, _ = harvest
+    run_heavy = embed._run_heavy
+    monkeypatch.setattr(embed, "_run_heavy", lambda *a: {"chart_patterns": 24})  # as if none fitted: nothing recorded
+    got = gen.compute(crawl, store, VIEWS, PARAMS)
+    assert got["deferred"] == 24 and got["views"]["chart_patterns@3"] == {"deferred": 24} and got["computed"] == 24
+    monkeypatch.setattr(embed, "_run_heavy", run_heavy)
+    got = gen.compute(crawl, store, VIEWS, PARAMS)
+    assert got["computed"] == 24 and got["deferred"] == 0 and set(got["views"]) == {"chart_patterns@3"}
 
 
 def test_compute_covers_the_named_pool(harvest):

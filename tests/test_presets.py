@@ -77,8 +77,11 @@ def test_check_hands_names_why_each_hand_is_left_out():
         {"id": "half", "label": "半分", "inputs": [], "handling": "narrow_then_rank", "knobs": {"narrow": {"music_x": 1}}},
         {"id": "tags", "label": "タグ", "inputs": [], "handling": "near", "knobs": {"weights": {"meta_x": 1}}},
         {"id": "ok", "label": "同じ id", "inputs": [], "handling": "near", "knobs": {}},
-    ], views, set())
-    assert set(bad) == {"half", "tags", "ok"}
+        {"id": "yours", "label": "好み", "inputs": [], "handling": "near", "knobs": {"genreFrom": ["jpop", "rock"]}},
+        {"id": "enka", "label": "演歌", "inputs": [], "handling": "near", "knobs": {"genreFrom": ["jpop", "enka"]}},
+        {"id": "empty", "label": "空", "inputs": [], "handling": "near", "knobs": {"genreFrom": []}},
+    ], views, {"jpop", "rock"})
+    assert set(bad) == {"half", "tags", "ok", "enka", "empty"}
     assert "rank" in bad["half"] and "meta_x" in bad["tags"] and "earlier" in bad["ok"]
 
 
@@ -94,6 +97,10 @@ def test_expand_turns_a_hand_into_conditions(hands):
         "seed": seed, "count": 5, "weights": {"music_x": 1}, "difficulty": "auto"}
     assert expand_preset(hands, {"preset": "genre", "choices": {"genre": "rock"}})["genre"] == "rock"
     assert expand_preset(hands, {"preset": "again"})["params"] == {"includeKnown": True}
+    hands.manifest["presets"] = HANDS + [{"id": "yours", "label": "好み", "inputs": [], "handling": "near",
+                                          "knobs": {"genreFrom": ["jpop"], "weights": {"music_x": 1}}}]
+    assert expand_preset(hands, {"preset": "yours"})["genreFrom"] == ["jpop"]
+    hands.manifest["presets"] = HANDS
     assert expand_preset(hands, {"preset": "song", "seed": seed, "weights": {"chart_x": 1}})["weights"] == {"chart_x": 1}
     with pytest.raises(UnknownPresetError):
         expand_preset(hands, {"preset": "pumpup"})

@@ -37,7 +37,7 @@ Inside the runtime (not in the contract; tools and tests use them):
 """
 # the runtime API's version (OctantSpecs contracts/engine-runtime.md, 版の付け方): separate from the package version, so
 # an implementation change that keeps the API keeps it; OctantCompass checks it at startup
-API_VERSION = "1.0"
+API_VERSION = "1.1"
 
 from .db import DB, DBError, VersionError, apply_diff, open_db, read_info, search  # noqa: F401
 from .recommend import RequestError, SeedNotEmbeddedError, SeedNotInDBError, describe, recommend  # noqa: F401
