@@ -44,7 +44,8 @@ def harvest(tmp_path, monkeypatch):
 def test_compute_is_resumable_and_reads_only_its_arguments(harvest):
     tmp_path, crawl, store, _ = harvest
     got = gen.compute(crawl, store, VIEWS, PARAMS)
-    assert got["computed"] == 48 and got["failed"] == 0 and set(got["views"]) == set(VIEWS)
+    # swing_flow too, though not named: a release fills Pass and Tech from it
+    assert got["computed"] == 72 and got["failed"] == 0 and set(got["views"]) == set(VIEWS) | {"swing_flow@12"}
     assert (store / "ledger.sqlite").exists() and not (tmp_path / "store").exists()
     assert gen.compute(crawl, store, VIEWS, PARAMS) == {"computed": 0, "failed": 0, "skipped": 0, "deferred": 0,
                                                          "views": {}}
@@ -55,19 +56,20 @@ def test_compute_reports_the_maps_the_gpu_had_no_room_for_and_the_next_call_comp
     _, crawl, store, _ = harvest
     run_heavy = embed._run_heavy
     monkeypatch.setattr(embed, "_run_heavy", lambda *a: {"chart_patterns": 24})  # as if none fitted: nothing recorded
+    # (swing_flow, also a zip view, is left uncomputed by the stand-in too)
     got = gen.compute(crawl, store, VIEWS, PARAMS)
     assert got["deferred"] == 24 and got["views"]["chart_patterns@3"] == {"deferred": 24} and got["computed"] == 24
     monkeypatch.setattr(embed, "_run_heavy", run_heavy)
     got = gen.compute(crawl, store, VIEWS, PARAMS)
-    assert got["computed"] == 24 and got["deferred"] == 0 and set(got["views"]) == {"chart_patterns@3"}
+    assert got["computed"] == 48 and got["deferred"] == 0 and set(got["views"]) == {"chart_patterns@3", "swing_flow@12"}
 
 
 def test_compute_covers_the_named_pool(harvest):
     _, crawl, store, _ = harvest
     params = {**PARAMS, "pools": {"few": {"sample": 5, "seed": 1}}}
-    assert gen.compute(crawl, store, VIEWS, params, pool="few")["computed"] == 10
+    assert gen.compute(crawl, store, VIEWS, params, pool="few")["computed"] == 15
     assert gen.compute(crawl, store, VIEWS, params, pool="few")["computed"] == 0
-    assert gen.compute(crawl, store, VIEWS, params)["computed"] == 38  # distribution: only the rest is computed
+    assert gen.compute(crawl, store, VIEWS, params)["computed"] == 57  # distribution: only the rest is computed
 
 
 def test_bad_arguments_are_refused(harvest):

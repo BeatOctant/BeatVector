@@ -402,8 +402,8 @@ def test_dot_join_window_and_crouch_tunnels():
 # Definitions of the stored swing views. When a change to the features, the [swing] defaults or the default tag
 # rules makes this fail, bump the encoder's version (encoders/swing.py) and update the pair here; bump the
 # derived views too when swing_flow changes, since they are computed from it.
-VIEW_DEFINITIONS = {"swing_flow": ("10", "44f88f3658578e53"), "swing_style": ("11", "d2502ed44a830ec2"),
-                    "swing_hazards": ("8", "26cd5cc7c6d0a052")}
+VIEW_DEFINITIONS = {"swing_flow": ("12", "5f86e4beeeb7708a"), "swing_style": ("13", "d2502ed44a830ec2"),
+                    "swing_hazards": ("10", "26cd5cc7c6d0a052")}
 
 
 def test_view_versions_follow_their_definitions(monkeypatch, tmp_path):
@@ -414,3 +414,19 @@ def test_view_versions_follow_their_definitions(monkeypatch, tmp_path):
            "swing_style": (get("swing_style").version, fp(style.load_rules("style"))),
            "swing_hazards": (get("swing_hazards").version, fp(style.load_rules("hazards")))}
     assert got == VIEW_DEFINITIONS
+
+
+def test_charts_no_one_can_play_get_no_features():
+    """An NJS of 1e20 (no one can see the notes) or many notes 999 lanes away (no one can reach them): no features,
+    so Pass and Tech stay empty. A few far notes are left out; notes a lane or two outside the grid are played."""
+    seq = [(2, 0, 1), (2, 1, 0)] * 8
+    assert chart_features(parse(v3(seq), 120, P["max_njs"]), P)[0] is not None
+    assert chart_features(parse(v3(seq), 120, 1e20), P) == (None, [], {})
+    wide = [(x if x != 2 else 6, y, d) for x, y, d in seq]
+    assert chart_features(parse(v3(wide), 120, 16), P)[0] is not None
+    far = seq[:-2] + [(999, 1, 0)] * 2  # 2 of 16 (12.5%) out of reach: no one can play it
+    assert chart_features(parse(v3(far), 120, 16), P) == (None, [], {})
+    few = seq * 2 + [(999, 1, 0)] * 2  # 2 of 34: left out, the rest is measured as without them
+    got, base = chart_features(parse(v3(few), 120, 16), P)[0], chart_features(parse(v3(seq * 2), 120, 16), P)[0]
+    assert got[NAMES.index("pass")] == pytest.approx(base[NAMES.index("pass")])
+    assert got[NAMES.index("tech")] == pytest.approx(base[NAMES.index("tech")])

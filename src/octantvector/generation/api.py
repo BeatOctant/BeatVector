@@ -125,13 +125,14 @@ def _results(store):
 @_contract
 def compute(input, store, views, params=None, pool="distribution", models_dir=None, log=None):
     """Ingest the crawl into the ledger and compute what it says is missing for `views` (and the sources of derived
-    ones) over the pool `pool` (params["pools"], OctantSpecs octantvector/config.md). models_dir: the folder holding the
+    ones, and the views the chart metrics come from: dbrelease.METRICS) over the pool `pool` (params["pools"], OctantSpecs octantvector/config.md). models_dir: the folder holding the
     models `models(views)` lists. Resumable; a second call right after computes nothing. When the GPU has no room the
     models take fewer maps at a time; a map that does not fit even alone is left uncomputed and unrecorded ("deferred"),
     so the next call computes it.
     -> {"computed": n, "failed": n, "skipped": n, "deferred": n,
         "views": {id@version: {"ok"|"error"|"skip"|"deferred": n}}}, this call's."""
     ids = _ids(views)
+    ids += [i for i in dbrelease.metric_views() if i not in ids]  # a release fills the chart metrics from these
     with config.given(_values(input, store, params, models_dir)):
         before = _results(store)
         no_room = embed.run(config.load(), ids, pool=pool, log=log or io.StringIO())

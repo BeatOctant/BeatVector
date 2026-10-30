@@ -4,6 +4,7 @@ Groups: speed, rhythm, wrist angle, parity, movement, multi-note, walls, bombs, 
 and the style tags built on it are in OctantSpecs octantvector/swing.md.
 """
 import math
+from dataclasses import replace
 
 import numpy as np
 
@@ -61,9 +62,18 @@ def _snap_class(db, tol):
 
 
 def chart_features(chart: Chart, P):
-    """-> (vector (len(NAMES),) float32, swings, ratings) or (None, [], {}) for charts with too few notes."""
-    if len(chart.notes) < P["min_notes"]:
+    """-> (vector (len(NAMES),) float32, swings, ratings), or (None, [], {}) for charts no one can play as written:
+    too few notes, an NJS above max_njs (no one can see the notes), or more than max_unreachable_frac of the notes
+    outside play_lanes / play_rows. The notes out there in the other charts are left out (no one can reach them)."""
+    (x0, x1), (y0, y1) = P["play_lanes"], P["play_rows"]
+    reach = [n for n in chart.notes if x0 <= n.x <= x1 and y0 <= n.y <= y1]
+    if (len(chart.notes) < P["min_notes"] or chart.njs > P["max_njs"]
+            or len(chart.notes) - len(reach) > P["max_unreachable_frac"] * len(chart.notes)):
         return None, [], {}
+    if len(reach) < len(chart.notes):
+        chart = replace(chart, notes=reach)
+        if len(reach) < P["min_notes"]:
+            return None, [], {}
     both, rat, hz = simulate_all(chart, P)
     span = max(chart.length_s, 1.0)
     sw = [s for s in both if s.dt > 0]  # swings with a previous swing on the same hand

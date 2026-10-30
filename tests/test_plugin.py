@@ -131,7 +131,8 @@ def test_compute_reads_models_from_the_models_dir_argument_only(harvest, tmp_pat
         gen.compute(crawl, store, ["fake_reads"], PARAMS, models_dir=tmp_path / "models")
     (tmp_path / "models" / B.path).mkdir(parents=True)
     (tmp_path / "models" / B.path / "b.bin").write_text("7")
-    assert gen.compute(crawl, store, ["fake_reads"], PARAMS, models_dir=tmp_path / "models")["computed"] == 24
+    assert gen.compute(crawl, store, ["fake_reads"], PARAMS, models_dir=tmp_path / "models")["views"]["fake_reads@1"] \
+        == {"ok": 24}
 
 
 class EP:

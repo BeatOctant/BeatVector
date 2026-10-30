@@ -36,6 +36,16 @@ def _views(value, views, genres):
     return None
 
 
+def _view_groups(value, views, genres):
+    if not isinstance(value, list) or len(value) < 2:
+        return "all is not a list of two or more views with weights"
+    for group in value:
+        why = _views(group, views, genres)
+        if why:
+            return why
+    return None
+
+
 def _difficulty(value, views, genres):
     if value in AIMS or value == "auto":
         return None
@@ -65,17 +75,37 @@ def _params(value, views, genres):
     return why_invalid(value)
 
 
+def _hand_ids(value, views, genres):
+    """The hands a mixed hand draws from: two or more distinct ids. Whether each one is in the list, and can be
+    served, is checked against the whole list (why_not_mixing), not here."""
+    if not isinstance(value, list) or len(value) < 2:
+        return "hands is not a list of two or more hand ids"
+    if not all(isinstance(h, str) and h for h in value):
+        return "hands has an entry that is not a hand id"
+    if len(set(value)) != len(value):
+        return "hands names a hand twice"
+    return None
+
+
 # Handlings this OctantVector knows: {handling: {knob: (check, contract 1 (OctantCompass/OctantHarvest to OctantVector) condition it becomes)}}.
 #   near              rank by the weighted views around the seed (or the history without one); without a seed,
-#                     `genreFrom` picks the word of the list the liked maps are closest to and keeps its maps
+#                     `genreFrom` picks the word of the list the liked maps are closest to and keeps its maps.
+#                     `all` in place of `weights`: two or more views with weights, each of which the map must be
+#                     close in (recommend ranks by the lowest percentile: "close in this and in that")
 #   narrow_then_rank  keep the maps closest by `narrow`, then rank them by `rank` (recommend's `narrow` condition)
+#   mixed             one list drawn from the hands named in `hands` (ids of other hands in the same list, not mixed
+#                     ones), each hand's share of the places set by the player's reactions to its earlier drafts
+#                     (recommend's `mix` condition; spikes/2026-10-29-preset-reactions). The seed, the difficulty and
+#                     the params of the request reach every hand; a hand's own knobs fill what the request leaves out
 HANDLINGS = {
-    "near": {"weights": (_views, "weights"), "difficulty": (_difficulty, "difficulty"), "genre": (_genre, "genre"),
+    "near": {"weights": (_views, "weights"), "all": (_view_groups, "all"), "difficulty": (_difficulty, "difficulty"), "genre": (_genre, "genre"),
              "genreFrom": (_genre_from, "genreFrom"), "params": (_params, "params")},
     "narrow_then_rank": {"narrow": (_views, "narrow"), "rank": (_views, "weights"),
                          "difficulty": (_difficulty, "difficulty"), "params": (_params, "params")},
+    "mixed": {"hands": (_hand_ids, "mix"), "difficulty": (_difficulty, "difficulty"), "params": (_params, "params")},
 }
-REQUIRED_KNOBS = {"narrow_then_rank": ("narrow", "rank")}
+REQUIRED_KNOBS = {"narrow_then_rank": ("narrow", "rank"), "mixed": ("hands",)}
+EITHER_KNOBS = (("weights", "all"),)  # knobs a hand has one of at most (also one condition slot: presets._expand)
 CHOICE_KNOBS = ("genre", "difficulty")  # knobs a choice input can fill (one value each)
 
 def inputs(hand, views, genres):
@@ -131,6 +161,9 @@ def why_not(hand, views, genres):
     for name in REQUIRED_KNOBS.get(handling, ()):
         if name not in knobs:
             return f"{handling} needs the knob {name!r}"
+    for pair in EITHER_KNOBS:
+        if all(name in knobs for name in pair):
+            return f"knobs {' and '.join(pair)} are one or the other"
     for name, value in knobs.items():
         if name not in HANDLINGS[handling]:
             return f"knob {name!r} is unknown to {handling}"
@@ -142,9 +175,35 @@ def why_not(hand, views, genres):
     return inputs(hand, views, genres)[1]
 
 
+def needs_seed(hand, views, genres):
+    """True when the hand cannot be asked without a seed (a seed input that is not optional)."""
+    listed = inputs(hand, views, genres)[0] or []
+    return any(item["kind"] == "seed" and not item.get("optional") for item in listed)
+
+
+def why_not_mixing(hand, served, views, genres):
+    """None when a mixed hand can draw from every hand it names, else why not. `served`: {id: hand} of the hands of
+    the same list that passed why_not. A named hand must be there and not be mixed itself (one level: the reactions
+    are recorded per hand, so a mix of mixes would have no reactions of its own to learn from); when the mixed hand
+    can be asked without a seed, so must every hand it names, or that hand could not be asked."""
+    if hand.get("handling") != "mixed":
+        return None
+    for name in hand["knobs"]["hands"]:
+        other = served.get(name)
+        if other is None or name == hand["id"]:
+            return f"mixed names the hand {name!r}, which is not in the list"
+        if other.get("handling") == "mixed":
+            return f"mixed names the hand {name!r}, which is mixed itself"
+        if not needs_seed(hand, views, genres) and needs_seed(other, views, genres):
+            return f"mixed may be asked without a seed but the hand {name!r} needs one"
+        if any(item["kind"] == "choice" and not item.get("optional") for item in inputs(other, views, genres)[0] or []):
+            return f"the hand {name!r} needs a choice, which a mixed hand does not gather"
+    return None
+
+
 def check_hands(hands, views, genres):
     """{index or id: reason} for every hand that would be left out (and duplicate ids)."""
-    out, seen = {}, set()
+    out, seen, served = {}, set(), {}
     for n, hand in enumerate(hands):
         why = why_not(hand, views, genres)
         key = hand.get("id") if isinstance(hand, dict) and isinstance(hand.get("id"), str) else n
@@ -152,5 +211,12 @@ def check_hands(hands, views, genres):
             why = "the id is used by an earlier hand"
         if why:
             out[key] = why
+        else:
+            served[key] = hand
         seen.add(key)
+    for hand in hands:  # a mixed hand draws from the hands that passed, wherever they are in the list
+        if isinstance(hand, dict) and hand.get("handling") == "mixed" and hand.get("id") not in out:
+            why = why_not_mixing(hand, served, views, genres)
+            if why:
+                out[hand["id"]] = why
     return out

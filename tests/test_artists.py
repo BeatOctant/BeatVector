@@ -126,15 +126,26 @@ def test_maps_per_artist_caps_one_artist_set_and_a_duet_is_another_artist(tmp_pa
 
 
 def test_a_cover_by_other_artists_is_not_the_same_song(tmp_path):
-    """Maps 1..3 have one tune: 1 and 2 by the same artist, 3 a cover by that artist with a guest."""
-    c = content(members={1: ["orig"], 2: ["orig"], 3: ["orig", "guest"]}, song=(1, 2, 3))
+    """Maps 1..4 have one tune: 1 and 2 by the same artist, 3 by that artist with a guest (one artist set holds the
+    other: the same song, as "A feat. B" mostly is), 4 a cover by another artist."""
+    c = content(members={1: ["orig"], 2: ["orig"], 3: ["orig", "guest"], 4: ["other"]}, song=(1, 2, 3, 4))
     db = open_db(write(tmp_path, c))
     out = recommend(db, [], {"seed": seed(0), "count": 29, "weights": {"music_x": 1}})
-    tune = [m for m in maps_of(out) if m in (1, 2, 3)]
-    assert len(tune) == 2 and 3 in tune  # one of 1 and 2 (the same song), and the cover
-    without = open_db(write(tmp_path, content(song=(1, 2, 3)), "plain"))
+    tune = [m for m in maps_of(out) if m in (1, 2, 3, 4)]
+    assert len(tune) == 2 and 4 in tune  # one of 1, 2 and 3 (the same song), and the cover
+    without = open_db(write(tmp_path, content(song=(1, 2, 3, 4)), "plain"))
     out = recommend(without, [], {"seed": seed(0), "count": 29, "weights": {"music_x": 1}})
-    assert len([m for m in maps_of(out) if m in (1, 2, 3)]) == 1  # without artists: audio only
+    assert len([m for m in maps_of(out) if m in (1, 2, 3, 4)]) == 1  # without artists: audio only
+
+
+def test_the_seeds_song_counts_as_already_in_the_list(tmp_path):
+    """Maps 0..2 have one tune by one artist: seeded with map 0, other mappers' maps of its song stay out."""
+    c = content(members={0: ["orig"], 1: ["orig"], 2: ["orig"]}, song=(0, 1, 2))
+    db = open_db(write(tmp_path, c))
+    out = recommend(db, [], {"seed": seed(0), "count": 29, "weights": {"music_x": 1}})
+    assert len(out["items"]) == 27 and not {1, 2} & set(maps_of(out))
+    out = recommend(db, [], {"seed": seed(0), "count": 29, "weights": {"music_x": 1}}, {"mapsPerSong": 2})
+    assert len([m for m in maps_of(out) if m in (1, 2)]) == 1  # the seed takes one of the two places
 
 
 def test_a_hand_naming_the_artist_view_is_served_only_with_it(tmp_path):

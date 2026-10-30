@@ -15,9 +15,16 @@ DEFAULTS = {
     "narrowTopMaps": 300,          # provisional: maps kept by `narrow` before ranking by `weights`
     "narrowWiden": 3,              # provisional: narrowTopMaps is multiplied by this while fewer than `count` are left (2026-10-13)
     "seedTasteWeight": 0.0,        # provisional: how much the player's taste is mixed into a seeded recommendation
+    "chainEvery": 0,               # provisional: with a seed, move the seed after every this many maps ("連想型",
+                                   # OctantSpecs open.md P4); 0: never
+    "chainFirstWeight": 0.0,       # provisional: share of the first seed's score kept after the seed moved (P6)
     "mapsPerSong": 1,              # provisional: maps of one song (other mappers' maps of it) in a list; 0: no limit
     "mapsPerArtist": 3,            # maps of one artist (the same artist set) in a list; 0: no limit (OctantSpecs law 3.4, 2026-10-12)
     "sameSongCosine": 0.9,         # provisional: mean music-view cosine from which two maps are the same song
+    "mixPriorDrafts": 20,          # provisional: in a mixed hand, drafts' worth of the hands' common keep rate that a
+                                   # hand's own keep rate is shrunk towards (n0 of OctantSpecs
+                                   # personal-data-overfitting.md, 個人化の強さ; 20 to 50 lost least in the forward test
+                                   # of spikes/2026-10-29-preset-reactions)
     # difficulty (difficulty-fit.md, 設定)
     "features": {"nps": 1.0, "njs": 1.0},  # chart features and their weights for the distance
     "k": 5,                        # nearest strong charts averaged into a distance
@@ -63,9 +70,12 @@ BOUNDS = {
     "narrowTopMaps": (1, 10**7, True),
     "narrowWiden": (2, 1000, True),
     "seedTasteWeight": (0, 1, False),
+    "chainEvery": (0, 10**4, True),
+    "chainFirstWeight": (0, 1, False),
     "mapsPerSong": (0, 10**4, True),
     "mapsPerArtist": (0, 10**4, True),
     "sameSongCosine": (-1, 1, False),
+    "mixPriorDrafts": (0, 10**6, False),
     "k": (1, 10**4, True),
     "normalPercentile": (0, 100, False),
     "strongRecentClears": (1, 10**6, True),

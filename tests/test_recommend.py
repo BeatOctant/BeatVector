@@ -164,6 +164,7 @@ def test_genre_from_picks_the_word_of_the_liked_maps(db):
     out = recommend(db, hist, {"genreFrom": ["rock", "jpop"], "count": 4}, {"genreTopShare": 0.5, **ONE_SONG_EACH})
     assert out["items"] and all(m % 2 == 0 for m in maps_of(out))
     assert all(m < N // 2 for m in maps_of(out))  # the reference is the liked maps, not recent plays
+    assert all(it["reason"]["genre"] == "jpop" for it in out["items"])  # the picked word, for display
     hist = liked(3) + liked(5)
     out = recommend(db, hist, {"genreFrom": ["rock", "jpop"], "count": 4}, {"genreTopShare": 0.5, **ONE_SONG_EACH})
     assert out["items"] and all(m % 2 == 1 for m in maps_of(out))
@@ -171,6 +172,8 @@ def test_genre_from_picks_the_word_of_the_liked_maps(db):
     out = recommend(db, hist, {"genreFrom": ["jpop"], "count": 4}, {"genreTopShare": 0.5, **ONE_SONG_EACH})
     assert out["items"] and all(m % 2 == 0 for m in maps_of(out))
     assert recommend(db, [], {"genreFrom": ["jpop"], "count": 4})["items"] == []
+    out = recommend(db, hist, {"count": 4}, ONE_SONG_EACH)
+    assert out["items"] and all("genre" not in it["reason"] for it in out["items"])  # no word: no genre
     with pytest.raises(RequestError, match="genre words"):
         recommend(db, hist, {"genreFrom": ["polka"]})
 
@@ -668,3 +671,154 @@ def test_the_floor_drops_charts_slower_than_the_recent_clears_by_more_than_the_m
     assert on["items"] and not any(m % 2 for m in maps_of(on))  # NJS 10 is below 16 - 3
     wide = recommend(db, hist, {"count": N}, {**p, "ceiling": True, "floorBelowMedian": 6.0})
     assert any(m % 2 for m in maps_of(wide))
+
+
+def rec(hand, rid, i, stage, at="2026-10-02T00:00:00Z"):
+    """A contract 3 recommendation event: chart i of draft rid of hand `hand` at `stage`."""
+    return {"type": "recommendation", "preset": hand, "requestId": rid, "hash": H(i), "characteristic": "Standard",
+            "difficulty": "Hard", "stage": stage, "at": at}
+
+
+def draft(hand, rid, kept, skipped, shown=()):
+    """A draft the player went on with: `kept` charts downloaded, `skipped` removed, `shown` left as they were."""
+    out = []
+    for i in list(kept) + list(skipped) + list(shown):
+        out.append(rec(hand, rid, i, "shown"))
+    out += [rec(hand, rid, i, "downloaded") for i in kept] + [rec(hand, rid, i, "skipped") for i in skipped]
+    return out
+
+
+def mix(seed_, count=6, **extra):
+    base = {"seed": seed_, "count": count, **extra}
+    return {**base, "difficulty": "auto",
+            "mix": [{"hand": "song", "request": {**base, "weights": {MUSIC: 1}}},
+                    {"hand": "chart", "request": {**base, "weights": {CHART: 1}}}]}
+
+
+def test_a_mixed_request_splits_the_places_between_its_hands(db):
+    s = seed(H(1), "Standard", "Hard")
+    out = recommend(db, [], mix(s), ONE_SONG_EACH)
+    items = out["items"]
+    assert [it["rank"] for it in items] == list(range(1, 7))
+    assert [it["reason"]["hand"] for it in items] == ["song", "chart"] * 3  # no draft yet: the same weight each
+    assert out["mix"] == {"song": {"weight": 1.0, "places": 3, "given": 3}, "chart": {"weight": 1.0, "places": 3, "given": 3}}
+    assert len({(it["hash"], it["characteristic"], it["difficulty"]) for it in items}) == 6
+    assert len({it["hash"] for it in items}) == 6  # chartsPerMap holds across the hands
+    song = recommend(db, [], {"seed": s, "count": 6, "weights": {MUSIC: 1}}, ONE_SONG_EACH)["items"]
+    chart = recommend(db, [], {"seed": s, "count": 6, "weights": {CHART: 1}}, ONE_SONG_EACH)["items"]
+    assert [i["hash"] for i in items if i["reason"]["hand"] == "song"] == [i["hash"] for i in song][:3]
+    mine = [i["hash"] for i in items if i["reason"]["hand"] == "chart"]
+    assert mine == [i["hash"] for i in chart if i["hash"] not in {i["hash"] for i in song[:3]}][:3]
+    assert all(set(it["reason"]) == {"views", "difficulty", "hand"} for it in items)
+    assert recommend(db, [], mix(s), ONE_SONG_EACH) == out
+
+
+def test_the_reactions_to_a_hands_drafts_move_its_places(db):
+    s = seed(H(1), "Standard", "Hard")
+    # song: three drafts, nothing skipped; chart: three drafts, most of each skipped
+    hist = []
+    for n in range(3):
+        hist += draft("song", f"s{n}", kept=[20 + n, 21 + n], skipped=[])
+        hist += draft("chart", f"c{n}", kept=[30 + n], skipped=[31 + n, 32 + n, 33 + n])
+    hist += draft("chart", "c9", kept=[], skipped=[34, 35])  # not gone on with: no reaction
+    hist += draft("mixed", "m0", kept=[36], skipped=[37])     # another hand's draft: not counted
+    out = recommend(db, hist, mix(s, count=10), {**ONE_SONG_EACH, "mixPriorDrafts": 0})
+    assert out["mix"]["song"]["weight"] == 1.0 and out["mix"]["chart"]["weight"] == 0.25
+    assert out["mix"]["song"]["places"] == 8 and out["mix"]["chart"]["places"] == 2
+    hands = [it["reason"]["hand"] for it in out["items"]]
+    assert hands[:4] == ["song", "chart", "song", "chart"] and hands[4:] == ["song"] * 6  # by rounds, heavier first
+    shrunk = recommend(db, hist, mix(s, count=10), {**ONE_SONG_EACH, "mixPriorDrafts": 20})["mix"]
+    assert 0.25 < shrunk["chart"]["weight"] < 0.625 < shrunk["song"]["weight"] < 1.0  # towards the common rate
+    assert shrunk["song"]["places"] + shrunk["chart"]["places"] == 10 and shrunk["chart"]["places"] >= 2
+    # the events of a mixed draft name the hand of each chart; a draft with a `hand` counts for that hand
+    tagged = [{**e, "preset": "mixed", "hand": "song"} for e in draft("song", "m1", kept=[], skipped=[38, 39])
+              ] + [{**e, "preset": "mixed", "hand": "song"} for e in draft("song", "m1", kept=[40], skipped=[])]
+    out = recommend(db, hist + tagged, mix(s, count=10), {**ONE_SONG_EACH, "mixPriorDrafts": 0})
+    assert out["mix"]["song"]["weight"] == pytest.approx((1 + 1 + 1 + 1 / 3) / 4, abs=1e-4)
+    assert recommend(db, hist, mix(s, count=10), ONE_SONG_EACH)["items"] == recommend(
+        db, list(reversed(hist)), mix(s, count=10), ONE_SONG_EACH)["items"]
+
+
+def test_a_mixed_request_takes_the_outer_aim_and_fills_from_the_other_hands(db):
+    s = seed(H(21), "Standard", "Hard")
+    req = mix(s, count=8, chartsPerMap=2)
+    req["difficulty"] = "normal"
+    req["mix"][1]["request"]["difficulty"] = "challenge"
+    out = recommend(db, strong_history(), req, {**ONE_SONG_EACH, "includeKnown": True, "minClears": 10})
+    aims = {it["reason"]["hand"]: it["reason"]["difficulty"]["aim"] for it in out["items"] if it["characteristic"] == "Standard"}
+    assert aims == {"song": "normal", "chart": "challenge"} and out["aims"] == {"Standard": "normal"}
+    s = seed(H(1), "Standard", "Hard")
+    # too few in one hand: the others fill the places
+    req = mix(s, count=6)
+    req["mix"][1]["request"]["genre"] = "rock"
+    req["mix"][1]["request"]["exclude"] = [{"hash": H(i)} for i in range(N) if i % 2 == 0 or i > 4]
+    out = recommend(db, [], req, ONE_SONG_EACH)
+    hands = [it["reason"]["hand"] for it in out["items"]]
+    assert len(hands) == 6 and hands.count("chart") <= 2 and hands.count("song") >= 4
+    assert out["mix"]["chart"]["given"] <= 2
+    with pytest.raises(RequestError):
+        recommend(db, [], {"seed": s, "mix": [{"hand": "song"}]})
+    with pytest.raises(RequestError):
+        recommend(db, [], {"seed": s, "mix": [{"hand": "song", "request": {}}, {"hand": "song", "request": {}}]})
+
+
+def test_a_chained_list_moves_its_seed_after_every_few_maps(db):
+    s = {"seed": seed(H(1), "Standard", "Hard"), "count": 9}
+    p = {**ONE_SONG_EACH, "mapsPerArtist": 0}
+    deep = maps_of(recommend(db, [], s, p))
+    assert maps_of(recommend(db, [], s, {**p, "chainEvery": 0})) == deep
+    assert maps_of(recommend(db, [], s, {**p, "chainEvery": 9})) == deep  # never moves within the list
+    chained = recommend(db, [], s, {**p, "chainEvery": 3})
+    assert len(chained["items"]) == 9 and maps_of(chained)[:3] == deep[:3]
+    assert deep[3] not in maps_of(chained)  # the map the seed moved to is not shown
+    assert recommend(db, [], s, {**p, "chainEvery": 3}) == chained  # same input, same list
+    # keeping all of the first seed's score: the one-seed list without the maps the seed moved to
+    longer = maps_of(recommend(db, [], {**s, "count": 12}, p))
+    kept = maps_of(recommend(db, [], s, {**p, "chainEvery": 3, "chainFirstWeight": 1.0}))
+    assert kept == [m for k, m in enumerate(longer) if k % 4 != 3][:9]
+    # without a seed it does nothing
+    hist = liked(0) + liked(2)
+    assert recommend(db, hist, {"count": 6}, {**p, "chainEvery": 2}) == recommend(db, hist, {"count": 6}, p)
+    with pytest.raises(RequestError, match="chainEvery"):
+        recommend(db, [], s, {"chainEvery": -1})
+
+
+def test_all_ranks_by_the_lowest_percentile_and_drops_maps_missing_an_entry(tmp_path):
+    """"Close in this and in that": a map very close in one view only gives way to one fairly close in both, which a
+    weighted mean ranks the other way round."""
+    c = dbformat.empty()
+    c["calibration"] = {"id": "cal1"}
+    music, vocal, chart = {}, {}, {}
+    rng = np.random.default_rng(2)
+    # (music angle, vocal angle) from the seed (map 0): small is close. Map 1 is the closest in music only (five maps
+    # are closer in vocals), map 2 fairly close in both, map 3 has no vocal vector, maps 4-8 are close in vocals only
+    # and maps 9.. far in both.
+    angles = ([(0, 0), (0.0, 0.95), (0.7, 0.7), (0.1, None)] + [(1.2, 0.8)] * 5
+              + [(1.4 + 0.01 * i, 1.4 + 0.01 * i) for i in range(12)])
+    for i, (a, b) in enumerate(angles):
+        h = H(i)
+        c["maps"][h] = (f"artist{i}", "mapper", 120.0, "2025-01-01")
+        c["charts"][h] = [("Standard", "Expert", 6, 16, None, None, "Standard")]
+        music[h] = unit([np.cos(a), np.sin(a), 0.01 * rng.normal()])
+        if b is not None:
+            vocal[h] = unit([np.cos(b), np.sin(b), 0.01 * rng.normal()])
+        chart[f"{h}:Standard:Expert"] = unit(rng.normal(size=3))
+    c["views"] = {MUSIC: {"meta": {"role": "music", "rows": "maps", "dim": 3}, "vecs": music},
+                  "vocal_x@1": {"meta": {"role": "vocal", "rows": "maps", "dim": 3}, "vecs": vocal},
+                  CHART: {"meta": {"role": "chart", "rows": "charts", "dim": 3}, "vecs": chart}}
+    db = open_db(dbformat.write_full(tmp_path / "db", c, "2026.10.30", "2026-10-30T00:00:00Z"))
+    s = {"hash": H(0), "characteristic": "Standard", "difficulty": "Expert"}
+    params = {"mapsPerSong": 0}
+    mean = recommend(db, [], {"seed": s, "count": 10, "weights": {"music_x": 1, "vocal_x": 1}}, params)
+    assert maps_of(mean)[0] == 1 and 3 in maps_of(mean)  # the weighted mean: music alone first, no vocal still in
+    both = recommend(db, [], {"seed": s, "count": 10, "all": [{"music_x": 1}, {"vocal_x": 1}]}, params)
+    assert maps_of(both)[0] == 2 and 3 not in maps_of(both)
+    assert set(both["items"][0]["reason"]["views"]) == {MUSIC, "vocal_x@1"}
+    # an entry the DB lacks is ignored and returned; the one left ranks like weights
+    one = recommend(db, [], {"seed": s, "count": 3, "all": [{"music_x": 1}, {"gone@9": 1}]}, params)
+    assert one["ignoredWeights"] == ["gone@9"]
+    assert maps_of(one) == maps_of(recommend(db, [], {"seed": s, "count": 3, "weights": {"music_x": 1}}, params))
+    with pytest.raises(RequestError):
+        recommend(db, [], {"seed": s, "all": [{"music_x": 1}], "count": 3})
+    with pytest.raises(RequestError):
+        recommend(db, [], {"seed": s, "weights": {"music_x": 1}, "all": [{"music_x": 1}, {"vocal_x": 1}]})

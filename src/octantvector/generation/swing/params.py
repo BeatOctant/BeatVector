@@ -109,6 +109,10 @@ DEFAULTS = {
     "sustained_swings": 8,        # window for the peak sustained swing rate (EBPM)
     "snap_tolerance_beats": 0.02,
     "min_notes": 16,              # charts with fewer colour notes get no features
+    "max_njs": 50.0,              # ... nor charts with a faster NJS (joke maps write 100 or 1e20: no one sees the notes)
+    "play_lanes": [-4.0, 7.0],    # colour notes outside these lanes or rows (Mapping Extensions or Noodle Extensions
+    "play_rows": [-3.0, 6.0],     # art 999 lanes away) are left out: no one can reach them ...
+    "max_unreachable_frac": 0.1,  # ... and a chart with more of its notes out there gets no features
 }
 
 LIST_KEYS = {k for k, v in DEFAULTS.items() if isinstance(v, list)}
@@ -126,4 +130,6 @@ def load(overrides: dict | None = None) -> dict:
     p["pass_windows"] = [int(w) for w in p["pass_windows"]]
     if len(p["gap_bins_s"]) != len(DEFAULTS["gap_bins_s"]) or len(p["row_y_m"]) != 3:
         raise GenerationError("[swing] gap_bins_s needs 4 edges and row_y_m 3 heights (they size the feature vector)")
+    if any(len(p[k]) != 2 or p[k][0] > p[k][1] for k in ("play_lanes", "play_rows")):
+        raise GenerationError("[swing] play_lanes and play_rows are [lowest, highest]")
     return p

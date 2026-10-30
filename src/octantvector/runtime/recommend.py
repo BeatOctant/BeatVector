@@ -10,11 +10,19 @@ recommend(db, history, request, params) ranks charts for one player:
      closest to it. With `genreFrom` (a list of genre words) and neither a seed nor a word, the word is picked for
      the player: the one of the list whose value is highest on average over the liked maps; the reference is all
      liked maps and the candidates are that word's maps ("your genre", measured by listening in OctantVector
-     spikes/2026-10-29-genre-view).
+     spikes/2026-10-29-genre-view). Every item's reason names the word that narrowed the list (`genre`), so the
+     player can see which genre was picked.
   3. every candidate chart gets a weighted mean of its views' cosines to the reference. A view the chart (or its
      map) has no vector in counts 0 and the weights are not renormalised; a chart whose views carry less than
      `minViewWeight` of the weight is dropped (OctantSpecs law 3.1). A view no reference has a vector in is not used.
-     Chart views compare charts of one play style only. A relation view (the artists, contract 2) gives a map its
+     Chart views compare charts of one play style only. With `all` (a list of two or more views with weights, like
+     `weights`, in place of it) the candidate must be close in every one: each entry's weighted mean becomes the
+     chart's percentile among the charts that have every entry, and the lowest percentile ranks the chart ("close in
+     this and in that"; the same order as lowering one threshold on every entry until enough are left). The rank is
+     put back on the scale of the weighted mean over every entry's views, so the difficulty penalty weighs as with
+     `weights`. A chart missing an entry (less than `minViewWeight` of its weight) is dropped; an entry no reference
+     can serve is ignored and returned like a weight, and with one entry left it is ranked like `weights`
+     (spikes/2026-10-30-all-views). A relation view (the artists, contract 2) gives a map its
      closeness to each reference map that has members and takes their mean; a map without members does not have it.
   4. difficulty (skill.py): in each play style the player has enough clears in, charts further from the aim's target
      distance than the tolerance are dropped (widened up to the maximum when too few are left) and the rest get a
@@ -28,16 +36,35 @@ recommend(db, history, request, params) ranks charts for one player:
   5. the best `chartsPerMap` charts of each map, the best `mapsPerSong` maps of each song and the best
      `mapsPerArtist` maps of each artist, then the best `count` overall. Fewer are returned when fewer pass. Two maps
      are the same song when their music views' mean cosine is at least `sameSongCosine` (other mappers' maps of one
-     song have nearly the same audio and would otherwise fill the list) and, when both have artists, their artist
-     sets are the same (a cover by other artists stays apart from the original); maps with no music view in common
-     are never the same song. Two maps are the same artist when their artist sets are the same; a map without
-     artists is not capped. Names are not used (OctantSpecs law 3.2 and 3.4).
+     song have nearly the same audio and would otherwise fill the list) and, when both have artists, one artist set
+     holds the other (a cover by other artists stays apart from the original, while "A" and "A feat. B" can be one
+     song); maps with no music view in common are never the same song. The seed's map counts as a map of its song
+     already in the list, so with the default `mapsPerSong` other mappers' maps of the seed's song stay out. Two maps
+     are the same artist when their artist sets are the same; a map without artists is not capped. Names are not
+     used (OctantSpecs law 3.2 and 3.4).
 With `narrow` (views with weights, like `weights`), the candidates are first narrowed to the
 `narrowTopMaps` maps closest to the same reference by those views (maps already excluded do not take a place), and
 the rest is ranked by `weights` as above; when fewer than `count` are left after the difficulty tolerance is widened,
 the narrowed maps are multiplied by `narrowWiden` until enough are left or every map is in (a rare play style has few
 charts among the closest maps): "close in sound, then ranked by the chart" (the narrow_then_rank handling,
 OctantSpecs plans/presets.md §8). Names the DB or the reference cannot serve are ignored and returned like weights.
+With `mix` (a list of {"hand", "request"}, from a mixed hand: runtime/presets.py), the list is drawn from several
+hands at once: each entry is recommended on its own with its request (`count` and `chartsPerMap` from the outer
+request; an entry's `difficulty` left out or "auto" takes the outer one) and the `count` places are split between the
+entries by weight, at least one each (largest remainder; when there are more entries than places, the heaviest
+entries take them). A hand's weight is its keep rate in the player's earlier drafts of that hand (the
+`recommendation` events, contract 3: a draft the player went on with, by downloading or playing from it; kept =
+downloaded or selected, skipped = removed or replaced; one rate per draft, since a draft's reactions come together),
+shrunk towards the mean rate over the mixed hands with the weight of `mixPriorDrafts` drafts; without any draft every
+hand weighs the same. The hands' charts are interleaved heaviest hand first, each hand's best first, a chart or a map
+already placed by an earlier hand is left to the later ones, and places a hand cannot fill go to the others. Each
+item's reason names its `hand`. The reactions change only how many places a hand gets, never a chart's rank within
+its hand, and they never make a map liked (history.py; spikes/2026-10-29-preset-reactions for the measurement).
+With a seed and `chainEvery` above 0 ("連想型", OctantSpecs open.md P4-P11), the list moves its seed as it goes: after
+every `chainEvery` maps, the next map the steps above would pick is not shown but becomes the seed, and the rest is
+scored against it the same way (its own chart; maps already picked stay out). `chainFirstWeight` keeps that share of
+the first seed's score in every later step (0: none). The filters, the difficulty fit and the song and artist caps
+apply to the whole list; the reason of an item is from the seed that picked it. Without a seed it does nothing.
 The result is the same for the same DB, history, request and params. There is no score in it: the reason is for
 display only (constitution principles 4 and 6).
 """
@@ -212,6 +239,55 @@ def _taste(db, weights, refs, min_share):
     return out
 
 
+def _taste_all(db, weights, groups, refs, min_share):
+    """-> _Taste for `all`: `groups` ({view: weight} each, served by `refs`) ranked by their lowest percentile, on the
+    scale of the weighted mean over `weights` (every group's views). The parts are each group's own."""
+    base = _taste(db, weights, refs, 0.0)
+    each = [_taste(db, g, refs, min_share) for g in groups]
+    out = _Taste(len(db.chart_keys))
+    out.ok = base.ok & np.logical_and.reduce([t.ok for t in each])
+    for t in each:
+        out.parts.update(t.parts)
+    n = int(out.ok.sum())
+    if not n:
+        return out
+    pct = [np.searchsorted(np.sort(t.score[out.ok]), t.score, "left") / max(n - 1, 1) for t in each]
+    low = np.minimum(np.minimum.reduce(pct), 1.0)
+    scale = np.sort(base.score[out.ok])
+    # ties of the lowest percentile go to the higher mean percentile (an amount too small to pass another rank)
+    out.score = scale[np.rint(low * (n - 1)).astype(int)] + 1e-9 * np.mean(pct, 0)
+    return out
+
+
+def _all(db, request):
+    """(names with weights, as `weights` for the references, [{view: weight}] per entry) for a request with `all`;
+    (request["weights"], None) without it."""
+    groups = request.get("all")
+    if groups is None:
+        return request.get("weights"), None
+    if request.get("weights") is not None:
+        raise RequestError("a request has weights or all, not both")
+    if not isinstance(groups, list) or len(groups) < 2 or not all(isinstance(g, dict) and g for g in groups):
+        raise RequestError("all is not a list of two or more views with weights")
+    wanted = {}
+    for g in groups:
+        for name, w in g.items():
+            wanted[name] = wanted.get(name, 0.0) + float(w)
+    return wanted, [_split(db, g)[0] for g in groups]
+
+
+def _served(weights, groups, refs):
+    """(weights, groups) for one set of references: each group keeps the views that are weighted and served (a
+    genre entry weighs music views only; a chained seed may lack a view); with fewer than two groups left the one
+    left (or `weights`) ranks like `weights`."""
+    if groups is None:
+        return weights, None
+    groups = [g for g in ({v: w for v, w in g.items() if v in weights and v in refs} for g in groups) if g]
+    if len(groups) >= 2:
+        return weights, groups
+    return (groups[0] if groups else weights), None
+
+
 def _seed_chart(db, seed, replaced):
     if not isinstance(seed, dict):
         raise RequestError(f"seed must be an object with hash, characteristic and difficulty, got {seed!r}")
@@ -279,10 +355,12 @@ def recommend(db, history, request, params=None):
         raise RequestError(f"params: {why}")
     p = resolve(params)
     request = request or {}
+    if request.get("mix") is not None:
+        return _mixed(db, history, request, params, p)
     hist = hist_mod.parse(db, history)
     replaced = list(hist.replaced)
     liked = hist.liked()
-    wanted = request.get("weights")
+    wanted, groups = _all(db, request)
     weights, ignored = _weights(db, wanted)
     default = _weights(db, None)[0]
     ex_maps, ex_charts = _exclusions(db, request.get("exclude"))
@@ -300,6 +378,11 @@ def recommend(db, history, request, params=None):
         rows |= {db.chart_pos[k] for h in maps if h not in with_plays for k in hist.imported.get(h, ())}
         return sorted(rows)
 
+    def taste(refs, min_share):
+        w, g = _served(weights, groups, refs)
+        return _taste(db, w, refs, min_share) if g is None else _taste_all(db, w, g, refs, min_share)
+
+    word = request.get("genre")  # the genre word that narrows the list, if any (each item's reason names it)
     if request.get("seed") is not None:
         if request.get("genre") is not None:  # with a seed, the word only narrows: "near this one, in that genre"
             allowed_maps = _genre_maps(db, request["genre"], float(p["genreTopShare"]))
@@ -313,11 +396,11 @@ def recommend(db, history, request, params=None):
         mix = float(p["seedTasteWeight"])
         if mix > 0 and liked:
             taste_refs = _references(db, weights, sorted(liked), played_charts(liked))
-            scored = _taste(db, weights, refs, p["minViewWeight"])
-            b = _taste(db, weights, taste_refs, 0.0)
+            scored = taste(refs, p["minViewWeight"])
+            b = taste(taste_refs, 0.0)
             scored.score = (1 - mix) * scored.score + mix * np.where(b.ok, b.score, 0.0)
         else:
-            scored = _taste(db, weights, refs, p["minViewWeight"])
+            scored = taste(refs, p["minViewWeight"])
     else:
         if request.get("genre") is not None:
             allowed_maps = _genre_maps(db, request["genre"], float(p["genreTopShare"]))
@@ -333,11 +416,17 @@ def recommend(db, history, request, params=None):
         else:
             ref_maps = sorted(liked)
         if not ref_maps or not weights:
-            return _result(db, [], replaced, {}, hist, ignored)
+            return _result(db, [], replaced, {}, hist, ignored, word)
         ref_charts = played_charts(set(ref_maps))
         weights, refs = _settle(db, wanted, weights, _references(db, weights, ref_maps, ref_charts), ignored, default,
                                 lambda w: _references(db, w, ref_maps, ref_charts))
-        scored = _taste(db, weights, refs, p["minViewWeight"])
+        scored = taste(refs, p["minViewWeight"])
+
+    chain = None
+    if request.get("seed") is not None and int(p["chainEvery"]) > 0:
+        def chain(row):
+            refs = _references(db, weights, [db.hashes[db.chart_map_array()[row]]], [row])
+            return taste(refs, p["minViewWeight"]) if refs else None
 
     narrowed = _narrow(db, request["narrow"], ref_maps, ref_charts, ex_maps, ignored, p) if request.get("narrow") else None
 
@@ -386,25 +475,152 @@ def recommend(db, history, request, params=None):
     count = int(request.get("count", 10))
     per_map = int(request.get("chartsPerMap", 1))
     tol, tol_max = float(p["toleranceSd"]), float(p["toleranceMaxSd"])
-    songs = _Songs(db, float(p["sameSongCosine"]), int(p["mapsPerSong"]), int(p["mapsPerArtist"]))
+    songs = _Songs(db, float(p["sameSongCosine"]), int(p["mapsPerSong"]), int(p["mapsPerArtist"]),
+                   [seed_map] if request.get("seed") is not None else [])
     pen = np.where(skilled, p["penaltyWeight"] * 0.05 * z ** 2, 0.0)
     top = int(p["narrowTopMaps"])
+    parts = {}
+
+    def pick(within, tol):
+        if chain is None:
+            out = _pick(db, within, skilled, z, scored.score - pen, tol, count, per_map, songs)
+            parts.update((c, scored.parts_of(c)) for c in out)
+            return out
+        return _chain_pick(db, within, skilled, z, scored, pen, tol, count, per_map, songs, chain,
+                           int(p["chainEvery"]), float(p["chainFirstWeight"]), parts)
+
     while True:
         within = cand if in_narrow is None else cand & (in_narrow < top)
         tol = float(p["toleranceSd"])
-        picked = _pick(db, within, skilled, z, scored.score - pen, tol, count, per_map, songs)
+        picked = pick(within, tol)
         while len(picked) < count and tol < tol_max:
             tol = min(tol_max, tol + 0.5)
-            picked = _pick(db, within, skilled, z, scored.score - pen, tol, count, per_map, songs)
+            picked = pick(within, tol)
         if len(picked) < count and caps and difficulty == "challenge":
             # under the ceiling the challenge target may lie above it: take the rest by the score, whose penalty puts
             # the charts nearest the target (the hardest left under the ceiling) first
-            picked = _pick(db, within, skilled, z, scored.score - pen, np.inf, count, per_map, songs)
+            picked = pick(within, np.inf)
         if len(picked) >= count or in_narrow is None or top >= len(narrowed):
             break
         top *= max(2, int(p["narrowWiden"]))  # too few in the narrowed maps (a rare play style): take more of them
-    picked = [(c, db.hashes[chart_map[c]], scored.parts_of(c), diff(c)) for c in picked]
-    return _result(db, picked, replaced, {s: t[0] for s, t in targets.items()}, hist, ignored)
+    picked = [(c, db.hashes[chart_map[c]], parts[c], diff(c)) for c in picked]
+    return _result(db, picked, replaced, {s: t[0] for s, t in targets.items()}, hist, ignored, word)
+
+
+def _mix_weights(history, hands, prior):
+    """{hand: weight} from the player's reactions to the drafts of each hand (contract 3 `recommendation` events,
+    stage shown / skipped / downloaded / selected, joined by requestId): per draft the player went on with, the
+    share of its reacted charts that were kept; a hand's rate is the mean over its drafts shrunk towards the mean
+    over every mixed hand's drafts with `prior` drafts' weight. Hands without a draft, or when no hand has one, take
+    the common rate. The hand of a draft is the event's `hand` when it has one (a chart of a mixed draft), else its
+    `preset`."""
+    drafts = {}
+    for e in history or ():
+        if not isinstance(e, dict) or e.get("type") != "recommendation":
+            continue
+        hand, rid, stage, key = e.get("hand") or e.get("preset"), e.get("requestId"), e.get("stage"), (
+            e.get("hash"), e.get("characteristic"), e.get("difficulty"))
+        if hand not in hands or not rid or stage not in ("shown", "skipped", "downloaded", "selected"):
+            continue
+        charts = drafts.setdefault((hand, rid), {})
+        charts.setdefault(key, set()).add(stage)
+    rates = {h: [] for h in hands}
+    for (hand, _), charts in sorted(drafts.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        kept = sum(1 for st in charts.values() if st & {"downloaded", "selected"})
+        skipped = sum(1 for st in charts.values() if "skipped" in st and not st & {"downloaded", "selected"})
+        if kept:  # the player went on with the draft, so its reactions were given
+            rates[hand].append(kept / (kept + skipped))
+    everything = [r for rs in rates.values() for r in rs]
+    common = sum(everything) / len(everything) if everything else 1.0
+    return {h: (sum(rs) + prior * common) / (len(rs) + prior) if rs and len(rs) + prior > 0 else common
+            for h, rs in rates.items()}
+
+
+def _mix_places(weights, count):
+    """{hand: places} splitting `count` by weight (largest remainder; ties to the earlier hand), then at least one
+    each while the places last, taken from the hands with most; with fewer places than hands, the heaviest hands
+    take them."""
+    order = sorted(weights, key=lambda h: (-weights[h], list(weights).index(h)))
+    chosen = order[:max(count, 0)]
+    total = sum(weights[h] for h in chosen) or 1.0
+    exact = {h: count * weights[h] / total for h in chosen}
+    places = {h: int(exact[h]) for h in chosen}
+    rest = count - sum(places.values())
+    for h in sorted(chosen, key=lambda h: (-(exact[h] - places[h]), order.index(h)))[:rest]:
+        places[h] += 1
+    for h in reversed(chosen):  # the lightest first: a place from the hand with most
+        if places[h] == 0:
+            most = max(chosen, key=lambda o: (places[o], -order.index(o)))
+            places[most] -= 1
+            places[h] += 1
+    return {h: places.get(h, 0) for h in weights}
+
+
+def _mixed(db, history, request, params, p):
+    """recommend for a `mix` request: one recommendation per entry, the places split by _mix_weights and
+    _mix_places, the lists interleaved (the docstring of recommend)."""
+    mix = request["mix"]
+    if not isinstance(mix, list) or not mix or not all(
+            isinstance(m, dict) and isinstance(m.get("hand"), str) and isinstance(m.get("request"), dict) for m in mix):
+        raise RequestError("mix must be a list of {hand, request} entries")
+    hands = [m["hand"] for m in mix]
+    if len(set(hands)) != len(hands):
+        raise RequestError("mix names a hand twice")
+    count = int(request.get("count", 10))
+    per_map = int(request.get("chartsPerMap", 1))
+    weights = _mix_weights(history, hands, float(p["mixPriorDrafts"]))
+    places = _mix_places(weights, count)
+    results = {}
+    for m in mix:
+        sub = {k: v for k, v in m["request"].items() if k != "mix"}
+        sub["count"], sub["chartsPerMap"] = count, per_map  # the whole count: a hand's spare charts fill others' places
+        if sub.get("difficulty") in (None, "auto"):
+            sub["difficulty"] = request.get("difficulty", "normal")
+        results[m["hand"]] = recommend(db, history, sub, {**(params or {}), **(sub.get("params") or {})})
+    order = sorted(hands, key=lambda h: (-places[h], -weights[h], hands.index(h)))
+    queues = {h: list(results[h]["items"]) for h in hands}
+    picked, seen_charts, per = [], set(), {}
+
+    def take(h):
+        while queues[h]:
+            it = queues[h].pop(0)
+            key = (it["hash"], it["characteristic"], it["difficulty"])
+            if key in seen_charts or per.get(it["hash"], 0) >= per_map:
+                continue
+            seen_charts.add(key)
+            per[it["hash"]] = per.get(it["hash"], 0) + 1
+            picked.append({**it, "reason": {**it["reason"], "hand": h}})
+            return True
+        return False
+
+    filled, open_ = {h: 0 for h in hands}, list(order)
+    while open_:  # a round: one chart from each hand with places left, heaviest first; each hand in its own order
+        for h in list(open_):
+            if filled[h] >= places[h] or not take(h):
+                open_.remove(h)
+            else:
+                filled[h] += 1
+    for h in order:  # places left (a hand had too few): the others' spare charts, heaviest hand first
+        while len(picked) < count and take(h):
+            pass
+    first = results[hands[0]]
+    replaced, seen = [], set()
+    for h in hands:
+        for r in results[h]["replaced"]:
+            k = (r["from"], r["to"])
+            if k not in seen:
+                seen.add(k)
+                replaced.append(r)
+    ignored = []
+    for h in hands:
+        ignored.extend(n for n in results[h]["ignoredWeights"] if n not in ignored)
+    aims = {}
+    for h in hands:  # a play style's aim: the first hand's, when the hands aim differently (each item says its own)
+        for style, aim in results[h]["aims"].items():
+            aims.setdefault(style, aim)
+    return {"dbVersion": db.version, "items": [{**it, "rank": n} for n, it in enumerate(picked, 1)], "aims": aims,
+            "replaced": replaced, "ignoredWeights": ignored, "unknownEvents": first["unknownEvents"],
+            "mix": {h: {"weight": round(weights[h], 4), "places": places[h], "given": filled[h]} for h in hands}}
 
 
 def _map_mask(db, hashes):
@@ -438,10 +654,11 @@ class _Songs:
     """Which picked maps are the same song, or the same artist, as a candidate map (OctantSpecs law 3.4): the music views
     (map rows), and the artist sets of the relation view of role `artist` when the DB has one."""
 
-    def __init__(self, db, threshold, per_song, per_artist=0):
+    def __init__(self, db, threshold, per_song, per_artist=0, seeds=()):
         self.db, self.threshold, self.per_song, self.per_artist = db, threshold, per_song, per_artist
         self.views = db.views_of_role("music")
         self.rel = db.artists()
+        self.seeds = list(seeds)  # maps whose song counts as already in the list (not their artists)
 
     def artists(self, h):
         return frozenset(self.rel.members_of(self.db.pos[h])) if self.rel is not None else frozenset()
@@ -455,8 +672,8 @@ class _Songs:
         return out
 
     def same(self, a, b, artists_a=frozenset(), artists_b=frozenset()):
-        if artists_a and artists_b and artists_a != artists_b:
-            return False
+        if artists_a and artists_b and not (artists_a <= artists_b or artists_b <= artists_a):
+            return False  # a featured artist on one side only still leaves one song (same-song spike, 2026-10-30)
         shared = [v for v in a if v in b]
         return bool(shared) and float(np.mean([a[v] @ b[v] for v in shared])) >= self.threshold
 
@@ -471,16 +688,48 @@ class _Songs:
         a = self.vectors(h)
         if not a:
             return False
-        return sum(self.same(a, self.vectors(o), artists, self.artists(o)) for o in picked) >= self.per_song
+        others = self.seeds + list(picked)
+        return sum(self.same(a, self.vectors(o), artists, self.artists(o)) for o in others) >= self.per_song
 
 
-def _pick(db, cand, skilled, z, score, tol, count, per_map, songs):
+def _chain_pick(db, cand, skilled, z, first, pen, tol, count, per_map, songs, make, every, first_weight, parts):
+    """-> chart rows: `every` maps at a time by _pick, then the next map _pick would take becomes the seed (its chart
+    is the reference, the map is not shown), until `count` are picked or no seed can be made. `parts` gets each picked
+    row's reason, from the seed that picked it."""
+    chart_map = db.chart_map_array()
+    cand = cand.copy()
+    taste, score = first, first.score
+    out, maps = [], []
+    while len(out) < count:
+        n = min(every, count - len(out))
+        step = _pick(db, cand, skilled, z, score - pen, tol, n + 1, per_map, songs, maps)
+        taken = step[:n]
+        for c in taken:
+            parts[c] = taste.parts_of(c)
+            if db.hashes[chart_map[c]] not in maps:
+                maps.append(db.hashes[chart_map[c]])
+        out += taken
+        if len(step) <= n or len(out) >= count:
+            break
+        seed = step[n]
+        cand &= ~_map_mask(db, maps + [db.hashes[chart_map[seed]]])[chart_map]
+        nxt = make(seed)
+        if nxt is None:
+            break
+        taste = nxt
+        score = np.where(nxt.ok, nxt.score, 0.0)
+        if first_weight > 0:
+            score = (1 - first_weight) * score + first_weight * first.score
+    return out
+
+
+def _pick(db, cand, skilled, z, score, tol, count, per_map, songs, prior=()):
     """-> chart rows, best first by score then row: within `tol` of the target, `per_map` per map, and the song and
-    artist caps (_Songs)."""
+    artist caps (_Songs), counting the maps in `prior` (map hashes already in the list) as picked."""
     rows = np.flatnonzero(cand & ~(skilled & (z > tol)))
     rows = rows[np.lexsort((rows, -score[rows]))]
     chart_map = db.chart_map_array()
-    out, per, maps = [], {}, []
+    out, per, maps = [], {}, list(prior)
     for c in rows.tolist():
         h = db.hashes[chart_map[c]]
         if per.get(h, 0) >= per_map:
@@ -496,12 +745,15 @@ def _pick(db, cand, skilled, z, score, tol, count, per_map, songs):
     return out
 
 
-def _result(db, picked, replaced, aims, hist, ignored):
-    """aims: {play style: aim used}; a play style missing there was not filtered by difficulty (too few clears)."""
+def _result(db, picked, replaced, aims, hist, ignored, word=None):
+    """aims: {play style: aim used}; a play style missing there was not filtered by difficulty (too few clears).
+    word: the genre word that narrowed the list (asked, or picked by `genreFrom`), named in every item's reason."""
     items = []
     for rank, (c, h, parts, diff) in enumerate(picked, 1):
         _, ch, d = chartids.split(db.chart_keys[c])
         reason = {"views": {v: round(s, 6) for v, s in parts.items()}, "difficulty": None}
+        if word is not None:
+            reason["genre"] = word
         if diff is not None:
             nh, nc, nd = chartids.split(diff["nearestStrong"])
             reason["difficulty"] = {"aim": diff["aim"], "distance": round(diff["distance"], 6),

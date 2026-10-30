@@ -304,24 +304,25 @@ def test_view_packs_add_replace_and_remove_views(world, cfg, monkeypatch):
     tmp_path, cal, pool, base = world
     # swing_flow is named: added with all its chart rows; chart_patterns@3 goes to version 4; meta_tags is not named
     from octantvector.generation.encoders import REGISTRY
+    update(cfg, ["swing_flow"])  # before `first`, so both carry the same Pass and Tech
     first, _ = dbrelease.release(config.load(), VIEWS, cal, built_at=AT + timedelta(days=1), log=io.StringIO(), full=True)
     monkeypatch.setattr(REGISTRY["chart_patterns"], "version", "4")
     update(cfg, ["swing_flow", "chart_patterns"])  # version 4 computes everything again
     new, diff = next_day(tmp_path, cfg, 2, view_ids=["swing_flow", "chart_patterns"])
     dm = json.loads((diff / "manifest.json").read_text())
-    assert set(dm["views"]) == {"swing_flow@10", "chart_patterns@4"} and dm["removedViews"] == [MT]
-    assert dm["views"]["swing_flow@10"]["change"] == "added" and "replaces" not in dm["views"]["swing_flow@10"]
-    assert dm["views"]["swing_flow@10"]["rows"] == "charts"
+    assert set(dm["views"]) == {"swing_flow@12", "chart_patterns@4"} and dm["removedViews"] == [MT]
+    assert dm["views"]["swing_flow@12"]["change"] == "added" and "replaces" not in dm["views"]["swing_flow@12"]
+    assert dm["views"]["swing_flow@12"]["rows"] == "charts"
     assert dm["views"]["chart_patterns@4"]["replaces"] == CP
     assert dm["counts"]["added"] == dm["counts"]["replaced"] == 0  # no map changed
     new_cal = json.loads((diff / dm["calibrationFile"]).read_text())
-    assert new_cal["extends"] == cal["id"] and set(new_cal["views"]) >= {"swing_flow@10", "chart_patterns@4"}
+    assert new_cal["extends"] == cal["id"] and set(new_cal["views"]) >= {"swing_flow@12", "chart_patterns@4"}
     assert new_cal["views"][MT] == json.loads(
         (first / json.loads((first / "manifest.json").read_text())["calibrationFile"]).read_text())["views"][MT]
 
     applied = apply_diff(first, diff, tmp_path / "host" / dm["dbVersion"])
     same_content(dbformat.read_content(applied), dbformat.read_content(new))
-    got = dbformat.read_content(applied)["views"]["swing_flow@10"]["vecs"]
+    got = dbformat.read_content(applied)["views"]["swing_flow@12"]["vecs"]
     stored = {k for k in Store(get("swing_flow"), tmp_path / "store").done() if k.split(":")[0] in set(pool)}
     assert got.keys() == stored and got  # the added view has all its chart rows
 
@@ -411,6 +412,41 @@ def test_chart_rows_match_the_catalogue_by_its_spelling_of_the_difficulty(tmp_pa
     assert search(db, ck(H(1)), CP, 3)["results"] and search(db, ck(H(2), difficulty="ExpertPlus"), CP, 3)["results"]
     assert f"1 charts left out, their difficulty is not in the catalogue: {ck(H(3), difficulty='Hard')}" \
         in log.getvalue()
+
+
+def test_pass_and_tech_come_from_the_stored_swing_simulation(world, cfg):
+    """swing_flow fills Pass and Tech of every chart it has a vector for without being one of the views; the others
+    stay empty, and chartMetrics names the view."""
+    tmp_path, cal, pool, base = world
+    assert json.loads((base / "manifest.json").read_text())["chartMetrics"] == {}  # swing_flow not computed: empty
+    update(cfg, ["swing_flow"])
+    log = io.StringIO()
+    out, diff = dbrelease.release(config.load(), VIEWS, cal, built_at=AT + timedelta(days=1), log=log)
+    m = json.loads((out / "manifest.json").read_text())
+    assert m["chartMetrics"] == {"pass": "swing_flow@12", "tech": "swing_flow@12"} and "swing_flow@12" not in m["views"]
+    e = get("swing_flow")
+    hs, X = Store(e, tmp_path / "store").load()
+    stored = {k: X[n] for n, k in enumerate(hs)}
+    t = pq.read_table(out / "charts.parquet").to_pydict()
+    for h, ps, tech in zip(t["hash"], t["pass"], t["tech"]):
+        v = stored.get(ck(h))
+        if v is None:
+            assert ps is None and tech is None
+        else:
+            assert ps == pytest.approx(float(v[e.names.index("pass")])) and tech == pytest.approx(float(v[e.names.index("tech")]))
+    assert sum(p is not None for p in t["pass"]) == len([h for h in t["hash"] if ck(h) in stored]) > 0
+    assert open_db(out).chart_metrics["pass"].shape == (30,)
+    dm = json.loads((diff / "manifest.json").read_text())  # the filled rows travel as changed rows
+    assert dm["chartMetrics"] == m["chartMetrics"] and dm["counts"]["replaced"] > 0
+    applied = apply_diff(base, diff, tmp_path / "applied")
+    assert pq.read_table(applied / "charts.parquet").to_pydict()["pass"] == t["pass"]
+
+
+def test_a_chart_with_too_many_notes_gets_no_swing_vector(world, cfg, monkeypatch):
+    monkeypatch.setattr(type(get("swing_flow")), "max_notes", 5)
+    from octantvector.generation.archive import MapZip
+    with MapZip(world[0] / "archive", H(1)) as mz:
+        assert get("swing_flow").embed_zip(mz) == {}
 
 
 HANDS = [{"id": "flow", "label": "流れ", "inputs": [{"kind": "seed"}], "handling": "narrow_then_rank",

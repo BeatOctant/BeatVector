@@ -19,8 +19,10 @@ published. A diff may add a view (a view pack: a view newly named), replace one 
 up) or remove one (no longer named); the calibration is then the previous one extended with the new views
 (calibration.extend). The files' formats are in dbformat.py.
 
-Not filled in yet: Pass and Tech of charts.parquet (the swing simulation is not in the ledger yet), so those
-columns are empty and manifest.chartMetrics is {}. The version is signed afterwards, when it is approved (api.sign).
+Pass and Tech of charts.parquet are the stored values of the swing simulation (`swing_flow`, METRICS), whether or not
+`swing_flow` is one of the views; contract 1's `compute` computes it for that reason. A chart without a stored value
+(another play style, too few or too many notes, a zip that failed) keeps them empty, and manifest.chartMetrics names
+the view that filled each column. The version is signed afterwards, when it is approved (api.sign).
 """
 import json
 import sys
@@ -36,6 +38,15 @@ from .errors import GenerationError
 from .ledger import Ledger
 from .normalisation import calibrated, normalise
 from .store import Store
+
+
+# charts.parquet's metric columns and the view whose stored (not normalised) feature of the same name fills each
+METRICS = {"pass": "swing_flow", "tech": "swing_flow"}
+
+
+def metric_views():
+    """The views a release reads the chart metrics from (compute computes them whatever the caller names)."""
+    return sorted(set(METRICS.values()))
 
 
 def build(cfg, view_ids, calibration, log=sys.stderr, relations=()):
@@ -63,6 +74,7 @@ def build(cfg, view_ids, calibration, log=sys.stderr, relations=()):
         c["charts"][h] = [(d.get("characteristic"), d.get("difficulty"), _num(d.get("nps")),
                            _num(d.get("njs")), None, None, charts.play_style(d.get("characteristic")))
                           for d in v.get("diffs", [])]
+    c["chart_metrics"] = _metrics(cfg, c["charts"], log)
     current_of_key = {recs[h][0]["id"]: h for h in hashes}
     c["superseded"] = {h: current_of_key[k] for h, k in old if k in current_of_key}
     want = set(hashes)
@@ -100,6 +112,38 @@ def build(cfg, view_ids, calibration, log=sys.stderr, relations=()):
         print(f"{key}: {len(c['relations'][key]['members'])} of {len(hashes)} maps have accounts", file=log)
     c["calibration"] = calibrations.plain(calibration)
     return c
+
+
+def _metrics(cfg, rows, log):
+    """Fill the METRICS columns of the chart rows {hash: [row]} in place from the stored views.
+    -> manifest.chartMetrics: {column: id@version of the view that filled it}."""
+    cols = {"pass": 4, "tech": 5}  # positions in a chart row (dbformat.py)
+    filled = {}
+    for i in metric_views():
+        e = get(i)
+        key = f"{e.id}@{e.version}"
+        names = [m for m, v in METRICS.items() if v == i]
+        if not (Path(cfg.store) / key).exists():
+            print(f"{key}: not computed; {', '.join(names)} stay empty", file=log)
+            continue
+        hs, X = Store(e, cfg.store).load()
+        at = [e.names.index(m) for m in names]
+        got = {charts.catalogue_spelling(k): X[n, at] for n, k in enumerate(hs)}
+        n = 0
+        for h, rs in rows.items():
+            for j, r in enumerate(rs):
+                v = got.get(charts.key(h, r[0], r[1]))
+                if v is None:
+                    continue
+                r = list(r)
+                for m, x in zip(names, v):
+                    r[cols[m]] = float(x)
+                rs[j] = tuple(r)
+                n += 1
+        print(f"{key}: {', '.join(names)} of {n} of {sum(len(rs) for rs in rows.values())} charts", file=log)
+        if n:
+            filled.update({m: key for m in names})
+    return filled
 
 
 def latest(root):

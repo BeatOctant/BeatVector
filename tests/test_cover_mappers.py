@@ -120,7 +120,7 @@ def test_the_mapper_relation_is_built_from_the_catalogue_when_views_name_it(harv
 
 def test_compute_and_calibrate_leave_the_mapper_relation_out(harvest):  # noqa: F811
     _, crawl, store, _ = harvest
-    assert set(gen.compute(crawl, store, VIEWS + [mappers.NAME], PARAMS)["views"]) == set(VIEWS)
+    assert set(gen.compute(crawl, store, VIEWS + [mappers.NAME], PARAMS)["views"]) == set(VIEWS) | {"swing_flow@12"}
     assert set(gen.calibrate(store, VIEWS + [mappers.NAME], PARAMS)["views"]) == set(VIEWS)
     assert gen.models([mappers.NAME]) == []
 

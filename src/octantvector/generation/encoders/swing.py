@@ -11,10 +11,12 @@ from .base import DerivedEncoder, Encoder, register
 @register
 class SwingFlow(Encoder):
     """Interpretable swing-simulation features of every Standard chart. The simulation models two sabers and
-    Standard play, so other play styles get no vector until a simulation is validated for them."""
+    Standard play, so other play styles get no vector until a simulation is validated for them. A chart with more than
+    `max_notes` notes gets none either: the simulation of a 500,000-note chart does not finish."""
     kind = "zip"
     id = "swing_flow"
-    version = "10"
+    version = "12"
+    max_notes = 50000
     rows = "charts"
     play_styles = ("Standard",)
     inputs = ("chart",)
@@ -28,12 +30,15 @@ class SwingFlow(Encoder):
         self.dim = len(NAMES)
 
     def params(self):
-        return {"charts": "every Standard chart", "features": list(self.names), "swing": self.P}
+        return {"charts": "every Standard chart", "max_notes": self.max_notes, "features": list(self.names),
+                "swing": self.P}
 
     def embed_zip(self, mz):
-        """-> {chart key: features} for every Standard chart with enough notes."""
+        """-> {chart key: features} for every Standard chart with enough notes and at most max_notes."""
         out = {}
         for d, ch in standard_charts(mz):
+            if len(ch.notes) > self.max_notes:
+                continue
             v = chart_features(ch, self.P)[0]
             if v is not None:
                 out[charts.key(mz.hash, "Standard", d)] = v
@@ -77,7 +82,7 @@ class SwingStyle(_SwingTags):
     each fine tag (0..1) that is not about walls or bombs. Needs the model file from `octantvector swing-train`
     (setting `swing_model`)."""
     id = "swing_style"
-    version = "11"
+    version = "13"
     group = "style"
     learned = True
 
@@ -87,5 +92,5 @@ class SwingHazards(_SwingTags):
     """Wall and bomb tags from `swing_flow` (art / workout / rhythm walls, art / dodge / rhythm bombs, ...): the
     score of each (0..1). Kept apart from `swing_style` so recommendations can weigh them separately."""
     id = "swing_hazards"
-    version = "8"
+    version = "10"
     group = "hazards"

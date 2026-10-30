@@ -184,3 +184,107 @@ def test_a_hand_with_params_values_outside_the_bounds_is_left_out(db):
         assert check_hands(db.manifest["presets"], {"music_x@1": "music"}, set())["spin"].startswith("toleranceMaxSd")
     finally:
         del db.manifest["presets"]
+
+
+MIXED = [
+    {"id": "song", "label": "似た曲", "inputs": [{"kind": "seed"}], "handling": "near",
+     "knobs": {"weights": {"music_x": 1}}},
+    {"id": "chart", "label": "似た譜面", "inputs": [{"kind": "seed"}], "handling": "near",
+     "knobs": {"weights": {"chart_x": 1}, "difficulty": "challenge", "params": {"mapsPerSong": 2}}},
+    {"id": "yours", "label": "好み", "inputs": [], "handling": "near", "knobs": {}},
+    {"id": "genre", "label": "ジャンル", "inputs": [{"kind": "choice", "name": "genre"}], "handling": "near",
+     "knobs": {}},
+    {"id": "mixed", "label": "おまかせ", "inputs": [{"kind": "seed"}], "handling": "mixed",
+     "knobs": {"hands": ["song", "chart"], "params": {"mapsPerSong": 0, "mixPriorDrafts": 5}}},
+]
+
+
+def test_a_mixed_hand_names_hands_of_the_list_and_takes_only_what_they_all_can(db):
+    db.manifest["presets"] = MIXED + [
+        {"id": "self", "label": "自分", "inputs": [{"kind": "seed"}], "handling": "mixed", "knobs": {"hands": ["self", "song"]}},
+        {"id": "gone", "label": "ない", "inputs": [{"kind": "seed"}], "handling": "mixed", "knobs": {"hands": ["song", "pumpup"]}},
+        {"id": "deep", "label": "二重", "inputs": [{"kind": "seed"}], "handling": "mixed", "knobs": {"hands": ["song", "mixed"]}},
+        {"id": "one", "label": "一つ", "inputs": [{"kind": "seed"}], "handling": "mixed", "knobs": {"hands": ["song"]}},
+        {"id": "twice", "label": "二度", "inputs": [{"kind": "seed"}], "handling": "mixed", "knobs": {"hands": ["song", "song"]}},
+        {"id": "noseed", "label": "起点なし", "inputs": [], "handling": "mixed", "knobs": {"hands": ["song", "yours"]}},
+        {"id": "asks", "label": "選ばせる", "inputs": [{"kind": "seed"}], "handling": "mixed", "knobs": {"hands": ["song", "genre"]}},
+        {"id": "free", "label": "起点なしでよい", "inputs": [], "handling": "mixed", "knobs": {"hands": ["yours", "chart"]}},
+        {"id": "late", "label": "後ろの手札", "inputs": [{"kind": "seed"}], "handling": "mixed", "knobs": {"hands": ["song", "tail"]}},
+        {"id": "tail", "label": "最後", "inputs": [{"kind": "seed"}], "handling": "near", "knobs": {}},
+        {"id": "bare", "label": "つまみなし", "inputs": [{"kind": "seed"}], "handling": "mixed", "knobs": {}},
+    ]
+    try:
+        listed = presets(db)["presets"]
+        assert [p["id"] for p in listed] == ["song", "chart", "yours", "genre", "mixed", "late", "tail"]
+        assert next(p for p in listed if p["id"] == "mixed")["inputs"] == [{"kind": "seed"}]
+        bad = check_hands(db.manifest["presets"], *_facts(db))
+        assert set(bad) == {"self", "gone", "deep", "one", "twice", "noseed", "asks", "free", "bare"}
+        assert "'pumpup'" in bad["gone"] and "mixed itself" in bad["deep"] and "'song'" in bad["noseed"]
+        assert "choice" in bad["asks"] and "'chart'" in bad["free"] and "hands" in bad["bare"]
+    finally:
+        del db.manifest["presets"]
+
+
+def test_a_mixed_hand_expands_into_one_request_per_hand(db):
+    db.manifest["presets"] = MIXED
+    try:
+        seed = {"hash": H(1), "characteristic": "Standard", "difficulty": "Hard"}
+        out = expand_preset(db, {"preset": "mixed", "seed": seed, "count": 6, "params": {"mapsPerSong": 1}})
+        assert out["seed"] == seed and out["count"] == 6 and out["difficulty"] == "auto"
+        assert out["params"] == {"mapsPerSong": 1, "mixPriorDrafts": 5}  # the caller's value over the hand's
+        assert [m["hand"] for m in out["mix"]] == ["song", "chart"]
+        song, chart = (m["request"] for m in out["mix"])
+        assert song == {"seed": seed, "count": 6, "params": {"mapsPerSong": 1, "mixPriorDrafts": 5},
+                        "weights": {"music_x": 1}}  # no difficulty of its own: recommend takes the request's
+        assert chart == {"seed": seed, "count": 6, "params": {"mapsPerSong": 1, "mixPriorDrafts": 5},
+                         "weights": {"chart_x": 1}, "difficulty": "challenge"}  # its own aim stays
+        with pytest.raises(RequestError):
+            expand_preset(db, {"preset": "mixed"})
+    finally:
+        del db.manifest["presets"]
+
+
+def test_a_chained_hand_is_a_near_hand_with_chain_params(db):
+    db.manifest["presets"] = HANDS + [
+        {"id": "chain", "label": "連想", "inputs": [{"kind": "seed"}], "handling": "near",
+         "knobs": {"params": {"chainEvery": 10}}},
+        {"id": "chain_bad", "label": "連想", "inputs": [{"kind": "seed"}], "handling": "near",
+         "knobs": {"params": {"chainEvery": 2.5}}}]
+    try:
+        listed = [p["id"] for p in presets(db)["presets"]]
+        assert "chain" in listed and "chain_bad" not in listed
+    finally:
+        del db.manifest["presets"]
+
+
+def test_a_hands_genre_labels_are_listed_for_the_words_the_db_has(hands):
+    yours = {"id": "yours", "label": "好み", "inputs": [], "handling": "near", "knobs": {"genreFrom": ["jpop", "rock"]},
+             "genreLabels": {"jpop": {"en": "J-pop", "ja": "J ポップ"}, "rock": "", "enka": "演歌"}}
+    hands.manifest["presets"] = HANDS + [yours]
+    listed = next(p for p in presets(hands)["presets"] if p["id"] == "yours")
+    assert listed["genreLabels"] == {"jpop": {"en": "J-pop", "ja": "J ポップ"}}  # not a text, not in the DB: out
+    hands.manifest["presets"] = HANDS + [{**yours, "genreLabels": "jpop"}]
+    assert "genreLabels" not in next(p for p in presets(hands)["presets"] if p["id"] == "yours")
+
+
+def test_all_is_a_near_knob_of_two_or_more_view_groups_and_stands_in_for_weights(db):
+    views = {"music_x@1": "music", "chart_x@1": "chart"}
+    both = {"id": "both", "label": "両方", "inputs": [{"kind": "seed"}], "handling": "near",
+            "knobs": {"all": [{"music_x": 1}, {"chart_x": 1}]}}
+    bad = check_hands([
+        both,
+        {"id": "one", "label": "一つ", "inputs": [], "handling": "near", "knobs": {"all": [{"music_x": 1}]}},
+        {"id": "gone", "label": "無い", "inputs": [], "handling": "near",
+         "knobs": {"all": [{"music_x": 1}, {"meta_x": 1}]}},
+        {"id": "twice", "label": "二重", "inputs": [], "handling": "near",
+         "knobs": {"weights": {"music_x": 1}, "all": [{"music_x": 1}, {"chart_x": 1}]}},
+    ], views, set())
+    assert set(bad) == {"one", "gone", "twice"} and "meta_x" in bad["gone"] and "one or the other" in bad["twice"]
+    db.manifest["presets"] = [both]
+    try:
+        seed = {"hash": H(1), "characteristic": "Standard", "difficulty": "Hard"}
+        assert expand_preset(db, {"preset": "both", "seed": seed})["all"] == both["knobs"]["all"]
+        own = expand_preset(db, {"preset": "both", "seed": seed, "weights": {"music_x": 1}})
+        assert own["weights"] == {"music_x": 1} and "all" not in own  # the caller's weights stand for the hand's all
+    finally:
+        del db.manifest["presets"]

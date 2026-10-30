@@ -1,4 +1,6 @@
 # environments / caches
+# no lock: CI installs from pyproject.toml, and a committed one went stale (numpy 1.26 with pyarrow 26)
+uv.lock
 .venv/
 venv/
 __pycache__/
